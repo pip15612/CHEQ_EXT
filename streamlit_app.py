@@ -548,117 +548,449 @@ def process_cheque(file_path, reader):
 
 
 # ==========================================
-# 6. STREAMLIT UI
+# 6. Template Processing Functions (from GUI)
+# ==========================================
+
+def xlookup(lookup_value, lookup_array, return_array, if_not_found=None):
+    """Mimics Excel's XLOOKUP function with automatic type conversion"""
+    try:
+        if not isinstance(lookup_array, pd.Series):
+            lookup_array = pd.Series(lookup_array)
+        if not isinstance(return_array, pd.Series):
+            return_array = pd.Series(return_array)
+        
+        # If lookup_value is numeric and lookup_array is string, convert lookup_array to numeric
+        if isinstance(lookup_value, (int, float)):
+            try:
+                lookup_array_numeric = pd.to_numeric(lookup_array, errors='coerce')
+                mask = lookup_array_numeric == lookup_value
+            except:
+                mask = lookup_array == lookup_value
+        else:
+            # Try direct comparison first
+            mask = lookup_array == lookup_value
+            # If no match and lookup_value is string that looks like a number, try numeric comparison
+            if not mask.any() and isinstance(lookup_value, str) and lookup_value.replace('.','').replace('-','').isdigit():
+                try:
+                    lookup_array_numeric = pd.to_numeric(lookup_array, errors='coerce')
+                    lookup_value_numeric = pd.to_numeric(lookup_value, errors='coerce')
+                    mask = lookup_array_numeric == lookup_value_numeric
+                except:
+                    pass
+        
+        if mask.any():
+            idx = mask.idxmax()
+            return return_array.iloc[idx]
+        else:
+            return if_not_found
+    except:
+        return if_not_found
+
+
+def process_template_filling(pdf_file, fchn_file, master_file, template_file, business_partner=""):
+    """Process template filling with lookups from FCHN and Master files"""
+    import openpyxl
+    
+    # Load Template
+    template_wb = openpyxl.load_workbook(template_file)
+    template_sheet = template_wb['TEMPLATE (TR Teams) ']
+    cash_sheet = template_wb['TEMPLATE (Cash Teams)']
+    
+    # Load data files
+    pdf_df = pd.read_excel(pdf_file, sheet_name=0, dtype={'Account number': str, 'Cheque Number': str})
+    fchn_df = pd.read_excel(fchn_file, sheet_name=0, dtype=str)
+    master_df = pd.read_excel(master_file, sheet_name=0, dtype=str)
+    
+    # Clear existing data in TR Teams
+    start_row = 11
+    end_row = template_sheet.max_row
+    for row_num in range(start_row, end_row + 1):
+        for col_num in range(1, 35):
+            template_sheet.cell(row_num, col_num).value = None
+    
+    # Process each row for TR Teams
+    for idx, pdf_row in pdf_df.iterrows():
+        row_num = start_row + idx
+        
+        cheque_number = pdf_row['Cheque Number']
+        amount = pdf_row['Amount']
+        account_number = pdf_row['Account number']
+        
+        # Determine Business Partner
+        if business_partner:
+            bp = business_partner
+        else:
+            bp = xlookup(account_number, master_df.iloc[:, 4], master_df.iloc[:, 6])
+        
+        # Fill Business Partner to Template
+        if bp:
+            template_sheet.cell(row_num, 2).value = str(bp)
+        
+        template_sheet.cell(row_num, 6).value = "23.12.2025"
+        template_sheet.cell(row_num, 10).value = "23.12.2025"
+        template_sheet.cell(row_num, 8).value = amount
+        template_sheet.cell(row_num, 15).value = f"CHQ{cheque_number}"
+        template_sheet.cell(row_num, 31).value = str(account_number)
+        
+        # Lookups from FCHN
+        cheque_str = str(cheque_number)
+        cheque_last8 = int(cheque_str[-8:]) if len(cheque_str) >= 8 else int(cheque_str)
+        
+        p_result = xlookup(cheque_last8, fchn_df.iloc[:, 0], fchn_df.iloc[:, 5])
+        if p_result is not None:
+            template_sheet.cell(row_num, 16).value = str(p_result)
+        
+        # Lookups from Master
+        if bp:
+            lookup_key = str(bp) + str(account_number)
+            
+            i_result = xlookup(lookup_key, master_df.iloc[:, 12], master_df.iloc[:, 11])
+            if i_result is not None:
+                template_sheet.cell(row_num, 9).value = str(i_result)
+            
+            k_result = xlookup(lookup_key, master_df.iloc[:, 12], master_df.iloc[:, 7])
+            if k_result is not None:
+                template_sheet.cell(row_num, 11).value = str(k_result)
+                template_sheet.cell(row_num, 17).value = str(k_result)
+            
+            y_result = xlookup(lookup_key, master_df.iloc[:, 12], master_df.iloc[:, 8])
+            if y_result is not None:
+                template_sheet.cell(row_num, 25).value = str(y_result)
+                template_sheet.cell(row_num, 37).value = str(y_result)
+            
+            ac_result = xlookup(lookup_key, master_df.iloc[:, 12], master_df.iloc[:, 10])
+            if ac_result is not None:
+                template_sheet.cell(row_num, 29).value = str(ac_result)
+        
+        # Company Code to Column A
+        a_result = xlookup(account_number, master_df.iloc[:, 4], master_df.iloc[:, 0])
+        if a_result is not None:
+            template_sheet.cell(row_num, 1).value = str(a_result)
+        
+        # Cost Center to Column R
+        r_result = xlookup(account_number, master_df.iloc[:, 4], master_df.iloc[:, 9])
+        if r_result is not None:
+            template_sheet.cell(row_num, 18).value = str(r_result)
+        
+        s_result = xlookup(account_number, master_df.iloc[:, 4], master_df.iloc[:, 1])
+        if s_result is not None:
+            template_sheet.cell(row_num, 19).value = str(s_result).zfill(4)
+    
+    # Process Cash Teams sheet
+    max_row = cash_sheet.max_row
+    for row in range(6, max_row + 1):
+        for col in range(1, 40):
+            cash_sheet.cell(row, col).value = None
+    
+    cash_start_row = 6
+    for idx, pdf_row in pdf_df.iterrows():
+        cash_row = cash_start_row + idx
+        
+        cheque_number = pdf_row['Cheque Number']
+        amount = pdf_row['Amount']
+        account_number = pdf_row['Account number']
+        
+        # Determine Business Partner
+        if business_partner:
+            bp = business_partner
+        else:
+            bp = xlookup(account_number, master_df.iloc[:, 4], master_df.iloc[:, 6])
+        
+        # A: Company Code
+        company_code = xlookup(account_number, master_df.iloc[:, 4], master_df.iloc[:, 0])
+        if company_code:
+            cash_sheet.cell(cash_row, 1).value = str(company_code)
+        
+        # B: Business Place
+        business_place = xlookup(account_number, master_df.iloc[:, 4], master_df.iloc[:, 1])
+        if business_place:
+            cash_sheet.cell(cash_row, 2).value = str(business_place).zfill(4)
+        
+        # E: Start Date
+        cash_sheet.cell(cash_row, 5).value = "23.12.2025"
+        
+        # F: Payment Amount
+        cash_sheet.cell(cash_row, 6).value = amount
+        
+        # G: Bank Account Number
+        cash_sheet.cell(cash_row, 7).value = str(account_number)
+        
+        # C: Company Name from FCHN column H
+        company_name = xlookup(str(account_number), fchn_df.iloc[:, 8], fchn_df.iloc[:, 7])
+        if company_name and str(company_name).lower() not in ['none', 'nan', '']:
+            cash_sheet.cell(cash_row, 3).value = str(company_name)
+        
+        # D: House Bank from FCHN column C
+        house_bank = xlookup(str(account_number), fchn_df.iloc[:, 8], fchn_df.iloc[:, 2])
+        if house_bank and str(house_bank).lower() not in ['none', 'nan', '']:
+            import re
+            bank_name_only = re.sub(r'\d+', '', str(house_bank)).strip()
+            cash_sheet.cell(cash_row, 4).value = bank_name_only
+        
+        # H: Assignment
+        cash_sheet.cell(cash_row, 8).value = f"CHQ{cheque_number}"
+        
+        # I: Business Partner
+        if bp:
+            cash_sheet.cell(cash_row, 9).value = str(bp)
+    
+    # Save to BytesIO
+    output = BytesIO()
+    template_wb.save(output)
+    template_wb.close()
+    output.seek(0)
+    
+    return output, len(pdf_df)
+
+
+# ==========================================
+# 7. STREAMLIT UI
 # ==========================================
 
 def main():
-    st.title("📄 Thai Cheque OCR Processor")
-    st.markdown("Extract data from Thai cheque images and PDFs using OCR")
+    st.title("📄 Thai Cheque Processing System")
+    st.markdown("Complete solution for Thai cheque OCR and template processing")
     
-    # Initialize OCR
-    with st.spinner("🚀 Initializing EasyOCR..."):
-        reader = initialize_easyocr()
+    # Create tabs
+    tab1, tab2 = st.tabs(["🔍 OCR Extraction", "📋 Template Processing"])
     
-    if reader is None:
-        st.error("Failed to initialize OCR. Please check the logs.")
-        return
-    
-    st.success("✅ OCR initialized successfully!")
-    
-    # File uploader
-    st.markdown("---")
-    st.subheader("📂 Upload Cheque Files")
-    uploaded_files = st.file_uploader(
-        "Choose PDF or image files",
-        type=['pdf', 'png', 'jpg', 'jpeg'],
-        accept_multiple_files=True
-    )
-    
-    if uploaded_files:
-        st.info(f"📎 {len(uploaded_files)} file(s) uploaded")
+    # ==========================================
+    # TAB 1: OCR EXTRACTION
+    # ==========================================
+    with tab1:
+        st.header("🔍 Extract Data from Cheques")
+        st.markdown("Upload cheque images/PDFs to extract data using OCR")
         
-        if st.button("🚀 Process Files", type="primary"):
-            all_results = []
+        # Initialize OCR
+        with st.spinner("🚀 Initializing EasyOCR..."):
+            reader = initialize_easyocr()
+        
+        if reader is None:
+            st.error("Failed to initialize OCR. Please check the logs.")
+        else:
+            st.success("✅ OCR initialized successfully!")
             
-            # Progress bar
-            progress_bar = st.progress(0)
-            status_text = st.empty()
+            # File uploader
+            st.markdown("---")
+            st.subheader("📂 Upload Cheque Files")
+            uploaded_files = st.file_uploader(
+                "Choose PDF or image files",
+                type=['pdf', 'png', 'jpg', 'jpeg'],
+                accept_multiple_files=True,
+                key="ocr_uploader"
+            )
             
-            for idx, uploaded_file in enumerate(uploaded_files):
-                status_text.text(f"Processing {uploaded_file.name}...")
+            if uploaded_files:
+                st.info(f"📎 {len(uploaded_files)} file(s) uploaded")
                 
-                # Save uploaded file temporarily
-                with tempfile.NamedTemporaryFile(delete=False, suffix=os.path.splitext(uploaded_file.name)[1]) as tmp_file:
-                    tmp_file.write(uploaded_file.getvalue())
-                    tmp_path = tmp_file.name
-                
+                if st.button("🚀 Extract Data", type="primary", key="extract_btn"):
+                    all_results = []
+                    
+                    # Progress bar
+                    progress_bar = st.progress(0)
+                    status_text = st.empty()
+                    
+                    for idx, uploaded_file in enumerate(uploaded_files):
+                        status_text.text(f"Processing {uploaded_file.name}...")
+                        
+                        # Save uploaded file temporarily
+                        with tempfile.NamedTemporaryFile(delete=False, suffix=os.path.splitext(uploaded_file.name)[1]) as tmp_file:
+                            tmp_file.write(uploaded_file.getvalue())
+                            tmp_path = tmp_file.name
+                        
+                        try:
+                            # Process the file
+                            results = process_cheque(tmp_path, reader)
+                            all_results.extend(results)
+                            
+                        except Exception as e:
+                            st.error(f"Error processing {uploaded_file.name}: {e}")
+                        
+                        finally:
+                            # Clean up temp file
+                            if os.path.exists(tmp_path):
+                                os.unlink(tmp_path)
+                        
+                        # Update progress
+                        progress_bar.progress((idx + 1) / len(uploaded_files))
+                    
+                    status_text.text("✅ Extraction complete!")
+                    
+                    # Display results
+                    if all_results:
+                        df = pd.DataFrame(all_results)
+                        
+                        st.markdown("---")
+                        st.subheader("📊 Extracted Data")
+                        st.dataframe(df, use_container_width=True)
+                        
+                        # Download Excel
+                        output = BytesIO()
+                        with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
+                            df.to_excel(writer, index=False, sheet_name='Sheet1')
+                            workbook = writer.book
+                            worksheet = writer.sheets['Sheet1']
+                            text_format = workbook.add_format({'num_format': '@'})
+                            
+                            for col_name in ["Cheque Number", "Account number", "Cheque digit", "Bank Code", "Branch Code"]:
+                                if col_name in df.columns:
+                                    col_idx = df.columns.get_loc(col_name)
+                                    worksheet.set_column(col_idx, col_idx, 20, text_format)
+                        
+                        output.seek(0)
+                        
+                        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                        st.download_button(
+                            label="📥 Download Extracted Data (Excel)",
+                            data=output,
+                            file_name=f"cheque_extracted_{timestamp}.xlsx",
+                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                            key="download_extracted"
+                        )
+                        
+                        st.success("💡 **Next step:** Use this file in 'Template Processing' tab!")
+                    else:
+                        st.warning("No results extracted from the files.")
+            
+            # Instructions
+            st.markdown("---")
+            st.markdown("""
+            ### 📝 Instructions
+            1. Upload Thai cheque images (PNG, JPG) or PDF files
+            2. Click **Extract Data** to process
+            3. Download the extracted Excel file
+            4. Use the Excel file in **Template Processing** tab
+            """)
+    
+    # ==========================================
+    # TAB 2: TEMPLATE PROCESSING
+    # ==========================================
+    with tab2:
+        st.header("📋 Fill Template from Extracted Data")
+        st.markdown("Upload extracted data and lookup files to fill TR & Cash templates")
+        
+        st.markdown("---")
+        
+        # File uploaders
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            st.subheader("📂 Required Files")
+            
+            template_file = st.file_uploader(
+                "1️⃣ Template File",
+                type=['xlsx'],
+                help="Template TR & Cash.xlsx",
+                key="template_uploader"
+            )
+            
+            pdf_file = st.file_uploader(
+                "2️⃣ Extracted Data (from Tab 1)",
+                type=['xlsx'],
+                help="Excel file from OCR extraction",
+                key="pdf_uploader"
+            )
+        
+        with col2:
+            st.subheader("📊 Lookup Files")
+            
+            fchn_file = st.file_uploader(
+                "3️⃣ FCHN File",
+                type=['xlsx'],
+                help="FCHN.xlsx for lookups",
+                key="fchn_uploader"
+            )
+            
+            master_file = st.file_uploader(
+                "4️⃣ Master File",
+                type=['xlsx'],
+                help="Copy of Master File*.xlsx",
+                key="master_uploader"
+            )
+        
+        # Business Partner input
+        st.markdown("---")
+        st.subheader("⚙️ Configuration")
+        business_partner = st.text_input(
+            "Business Partner (Optional)",
+            placeholder="e.g. UOB0052, CIM0199, TNB0497",
+            help="Leave empty for auto-lookup from Master file"
+        )
+        
+        # Process button
+        st.markdown("---")
+        
+        if st.button("🚀 Process Template", type="primary", key="process_template_btn", disabled=not all([template_file, pdf_file, fchn_file, master_file])):
+            if all([template_file, pdf_file, fchn_file, master_file]):
                 try:
-                    # Process the file
-                    results = process_cheque(tmp_path, reader)
-                    all_results.extend(results)
-                    
+                    with st.spinner("Processing template..."):
+                        # Save uploaded files temporarily
+                        with tempfile.NamedTemporaryFile(delete=False, suffix='.xlsx') as tmp_template:
+                            tmp_template.write(template_file.getvalue())
+                            tmp_template_path = tmp_template.name
+                        
+                        with tempfile.NamedTemporaryFile(delete=False, suffix='.xlsx') as tmp_pdf:
+                            tmp_pdf.write(pdf_file.getvalue())
+                            tmp_pdf_path = tmp_pdf.name
+                        
+                        with tempfile.NamedTemporaryFile(delete=False, suffix='.xlsx') as tmp_fchn:
+                            tmp_fchn.write(fchn_file.getvalue())
+                            tmp_fchn_path = tmp_fchn.name
+                        
+                        with tempfile.NamedTemporaryFile(delete=False, suffix='.xlsx') as tmp_master:
+                            tmp_master.write(master_file.getvalue())
+                            tmp_master_path = tmp_master.name
+                        
+                        # Process template filling
+                        output, total_rows = process_template_filling(
+                            tmp_pdf_path,
+                            tmp_fchn_path,
+                            tmp_master_path,
+                            tmp_template_path,
+                            business_partner
+                        )
+                        
+                        # Clean up temp files
+                        for tmp_path in [tmp_template_path, tmp_pdf_path, tmp_fchn_path, tmp_master_path]:
+                            if os.path.exists(tmp_path):
+                                os.unlink(tmp_path)
+                        
+                        st.success(f"✅ Template processed successfully! ({total_rows} rows)")
+                        
+                        # Download button
+                        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                        st.download_button(
+                            label="📥 Download Filled Template",
+                            data=output,
+                            file_name=f"Template_PDF_Filled_{timestamp}.xlsx",
+                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                            key="download_template"
+                        )
+                
                 except Exception as e:
-                    st.error(f"Error processing {uploaded_file.name}: {e}")
-                
-                finally:
-                    # Clean up temp file
-                    if os.path.exists(tmp_path):
-                        os.unlink(tmp_path)
-                
-                # Update progress
-                progress_bar.progress((idx + 1) / len(uploaded_files))
-            
-            status_text.text("✅ Processing complete!")
-            
-            # Display results
-            if all_results:
-                df = pd.DataFrame(all_results)
-                
-                st.markdown("---")
-                st.subheader("📊 Extracted Data")
-                st.dataframe(df, use_container_width=True)
-                
-                # Download Excel
-                output = BytesIO()
-                with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
-                    df.to_excel(writer, index=False, sheet_name='Sheet1')
-                    workbook = writer.book
-                    worksheet = writer.sheets['Sheet1']
-                    text_format = workbook.add_format({'num_format': '@'})
-                    
-                    for col_name in ["Cheque Number", "Account number", "Cheque digit", "Bank Code", "Branch Code"]:
-                        if col_name in df.columns:
-                            col_idx = df.columns.get_loc(col_name)
-                            worksheet.set_column(col_idx, col_idx, 20, text_format)
-                
-                output.seek(0)
-                
-                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-                st.download_button(
-                    label="📥 Download Excel Results",
-                    data=output,
-                    file_name=f"cheque_results_{timestamp}.xlsx",
-                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-                )
+                    st.error(f"❌ Error processing template: {str(e)}")
+                    st.exception(e)
             else:
-                st.warning("No results extracted from the files.")
-    
-    # Instructions
-    st.markdown("---")
-    st.markdown("""
-    ### 📝 Instructions
-    1. Upload Thai cheque images (PNG, JPG) or PDF files
-    2. Click **Process Files** to extract data
-    3. Review the extracted data in the table
-    4. Download the results as Excel file
-    
-    ### ℹ️ Extracted Fields
-    - **Date**: Cheque date
-    - **Payee**: Recipient name
-    - **Amount**: Numeric amount
-    - **Amount (Text)**: Amount in Thai words
-    - **MICR Data**: Cheque number, bank code, branch code, account number
-    """)
+                st.warning("⚠️ Please upload all required files!")
+        
+        # Instructions
+        st.markdown("---")
+        st.markdown("""
+        ### 📝 Instructions
+        1. Upload **Template TR & Cash.xlsx** file
+        2. Upload **Extracted Data** from Tab 1 (or any compatible Excel)
+        3. Upload **FCHN.xlsx** for lookups
+        4. Upload **Master File** for lookups
+        5. (Optional) Enter Business Partner code
+        6. Click **Process Template**
+        7. Download the filled template
+        
+        ### ℹ️ What this does
+        - Fills **TR Teams** sheet with lookups from FCHN & Master
+        - Fills **Cash Teams** sheet with bank information
+        - Applies formulas and formatting automatically
+        - Ready to import into SAP system
+        """)
 
 
 if __name__ == "__main__":
