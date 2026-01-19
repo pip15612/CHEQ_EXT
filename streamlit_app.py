@@ -13,6 +13,7 @@ import tempfile
 from datetime import datetime
 import time
 import shutil
+import traceback
 
 # =============================================================================
 # Configuration
@@ -35,55 +36,41 @@ def download_e13b_traineddata():
         return False
     
     e13b_file = os.path.join(tessdata_path, 'e13b.traineddata')
-    
-    # ตั้งค่า TESSDATA_PREFIX ให้ Tesseract รู้ว่าไฟล์อยู่ที่ไหน
     os.environ['TESSDATA_PREFIX'] = '/tmp/'
     
     if os.path.exists(e13b_file):
-        st.success('✅ MICR model พร้อมใช้งานแล้ว')
         return True
     
-    st.info('🔄 กำลังโหลด MICR recognition model...')
-    
-    # ไฟล์อยู่ที่ root ของ repo
     local_e13b = 'e13b.traineddata'
     
     try:
         if os.path.exists(local_e13b):
             shutil.copy(local_e13b, e13b_file)
-            st.success('✅ โหลด MICR model สำเร็จ!')
             return True
         else:
-            st.warning('⚠️ ไม่พบ e13b.traineddata ใน repo')
-            # ลองดาวน์โหลดจาก GitHub ถ้าไม่มีในไฟล์
             url = "https://github.com/DoubangoTelecom/tesseractMICR/raw/master/tessdata_best/e13b.traineddata"
             r = requests.get(url, timeout=60)
             if r.status_code == 200:
                 with open(e13b_file, 'wb') as f:
                     f.write(r.content)
-                st.success('✅ ดาวน์โหลด MICR model สำเร็จ!')
                 return True
             return False
     except Exception as e:
-        st.warning(f'⚠️ ไม่สามารถโหลด e13b.traineddata ได้: {str(e)}')
         return False
 
-@st.cache_resource
 @st.cache_resource(show_spinner=False)
 def initialize_easyocr():
     """Initialize EasyOCR reader (cached)"""
     try:
-        with st.spinner('🔄 กำลังโหลด OCR Model ครั้งแรก... (ใช้เวลา 2-3 นาที) กรุณารอสักครู่'):
-            reader = easyocr.Reader(['th', 'en'], gpu=False, verbose=False, download_enabled=True)
-        st.success('✅ โหลด EasyOCR สำเร็จ!')
+        with st.spinner('🔄 กำลังโหลด OCR Model... (ครั้งแรกใช้เวลา 2-3 นาที)'):
+            reader = easyocr.Reader(['th', 'en'], gpu=False, verbose=False)
         return reader
     except Exception as e:
         st.error(f'❌ ไม่สามารถโหลด EasyOCR ได้: {e}')
-        st.info('💡 ทดลองใช้ Tesseract แทน...')
         return None
 
 def clean_messy_date(text):
-    """แยกวันที่จาก text ที่ยุ่งเหยิง โดยใช้ sliding window หา pattern 8 หลัก"""
+    """แยกวันที่จาก text ที่ยุ่งเหยิง"""
     if not text or len(text) < 8:
         return None
     
@@ -117,11 +104,9 @@ def clean_messy_date(text):
 def extract_micr(image_np):
     """ดึงข้อมูล MICR จากด้านล่างของเช็ค"""
     try:
-        # ตั้งค่า tesseract command
         if os.name == 'nt' and os.path.exists(TESSERACT_CMD):
             pytesseract.pytesseract.tesseract_cmd = TESSERACT_CMD
         
-        # บน Linux/Streamlit ใช้ /tmp/tessdata
         if os.name != 'nt':
             os.environ['TESSDATA_PREFIX'] = '/tmp/'
         
@@ -130,17 +115,13 @@ def extract_micr(image_np):
         gray = cv2.cvtColor(micr_roi, cv2.COLOR_BGR2GRAY)
         _, binary = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
         
-        # ลองใช้ e13b ก่อน ถ้าไม่ได้ใช้ eng แทน
         try:
             micr_text = pytesseract.image_to_string(binary, lang='e13b', config='--psm 6')
         except:
-            # Fallback ใช้ eng
             micr_text = pytesseract.image_to_string(binary, lang='eng', config='--psm 6 -c tessedit_char_whitelist=0123456789')
         
         return micr_text.strip()
     except Exception as e:
-        if DEBUG:
-            st.warning(f'MICR extraction error: {e}')
         return ''
 
 def parse_micr_thai(micr_text):
@@ -169,8 +150,14 @@ def process_cheque(uploaded_file, reader, progress_callback=None):
     try:
         start_time = time.time()
         
+        # **FIX: Reset file pointer**
+        uploaded_file.seek(0)
+        
         # อ่านไฟล์
         file_bytes = uploaded_file.read()
+        if not file_bytes:
+            return {'error': 'ไฟล์ว่างเปล่า', 'filename': uploaded_file.name}
+        
         file_ext = uploaded_file.name.lower().split('.')[-1]
         
         if progress_callback:
@@ -186,18 +173,22 @@ def process_cheque(uploaded_file, reader, progress_callback=None):
                 images = convert_from_path(tmp_path, dpi=300)
                 image_np = cv2.cvtColor(np.array(images[0]), cv2.COLOR_RGB2BGR)
             finally:
-                os.unlink(tmp_path)
+                if os.path.exists(tmp_path):
+                    os.unlink(tmp_path)
         else:
             nparr = np.frombuffer(file_bytes, np.uint8)
             image_np = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
         
         if image_np is None:
-            return {'error': 'ไม่สามารถอ่านไฟล์ได้'}
+            return {'error': 'ไม่สามารถอ่านไฟล์ได้', 'filename': uploaded_file.name}
         
         if progress_callback:
             progress_callback(0.4, 'กำลังทำ OCR...')
         
         # OCR ด้วย EasyOCR
+        if reader is None:
+            return {'error': 'EasyOCR ไม่พร้อมใช้งาน', 'filename': uploaded_file.name}
+        
         results = reader.readtext(image_np)
         
         if progress_callback:
@@ -242,7 +233,7 @@ def process_cheque(uploaded_file, reader, progress_callback=None):
                 if date_str:
                     break
         
-        # หาชื่อผู้รับเงิน (บรรทัดที่มี "จ่าย" หรือ "PAY")
+        # หาชื่อผู้รับเงิน
         payee = ''
         for _, text, _ in results:
             if 'จ่าย' in text or 'PAY' in text.upper():
@@ -263,26 +254,24 @@ def process_cheque(uploaded_file, reader, progress_callback=None):
             'amount': amount,
             'date': date_str,
             'payee': payee,
-            'all_text': all_text,
+            'all_text': all_text[:200],  # จำกัดความยาว
             'processing_time': f'{elapsed_time:.2f}s'
         }
         
     except Exception as e:
-        return {'error': str(e), 'filename': uploaded_file.name}
+        # แสดง error แบบละเอียด
+        error_msg = f'{str(e)}\n{traceback.format_exc()}'
+        return {'error': error_msg, 'filename': uploaded_file.name}
 
 def process_template_filling(template_file, data_file):
-    """เติมข้อมูลลงใน Template (TR & Cash) ด้วย XLOOKUP logic"""
+    """เติมข้อมูลลงใน Template"""
     try:
-        # อ่าน Template
         template_df = pd.read_excel(template_file, sheet_name=None, engine='openpyxl')
-        
-        # อ่าน Data Source
         data_df = pd.read_excel(data_file, engine='openpyxl')
         
         if 'Ref.No.' not in data_df.columns or 'Trading Name' not in data_df.columns:
             return None, 'Data file ต้องมี columns: Ref.No. และ Trading Name'
         
-        # สร้าง lookup dictionary
         lookup_dict = {}
         for idx, row in data_df.iterrows():
             ref_no = str(row.get('Ref.No.', '')).strip()
@@ -294,11 +283,9 @@ def process_template_filling(template_file, data_file):
                     'Note': row.get('Note', '')
                 }
         
-        # Process แต่ละ Sheet
         output_sheets = {}
         for sheet_name, sheet_df in template_df.items():
             if 'Ref.No.' in sheet_df.columns:
-                # XLOOKUP logic
                 for idx, row in sheet_df.iterrows():
                     ref_no = str(row.get('Ref.No.', '')).strip()
                     if ref_no in lookup_dict:
@@ -309,7 +296,6 @@ def process_template_filling(template_file, data_file):
             
             output_sheets[sheet_name] = sheet_df
         
-        # สร้าง Excel file ใน memory
         output = BytesIO()
         with pd.ExcelWriter(output, engine='openpyxl') as writer:
             for sheet_name, sheet_df in output_sheets.items():
@@ -336,6 +322,8 @@ def main():
         st.error('❌ ไม่สามารถเริ่มระบบ OCR ได้ กรุณาลองใหม่อีกครั้ง')
         return
     
+    st.success('✅ ระบบพร้อมใช้งาน')
+    
     # Tabs
     tab1, tab2 = st.tabs(['📸 OCR Extraction', '📋 Template Processing'])
     
@@ -351,45 +339,51 @@ def main():
         
         if uploaded_files:
             if len(uploaded_files) > MAX_FILES_PER_BATCH:
-                st.warning(f'⚠️ จำกัดไม่เกิน {MAX_FILES_PER_BATCH} ไฟล์ต่อครั้ง (เพื่อประสิทธิภาพ)')
+                st.warning(f'⚠️ จำกัดไม่เกิน {MAX_FILES_PER_BATCH} ไฟล์ต่อครั้ง')
                 uploaded_files = uploaded_files[:MAX_FILES_PER_BATCH]
             
             if st.button('🚀 เริ่มประมวลผล'):
-                results = []
-                progress_bar = st.progress(0)
-                status_text = st.empty()
-                
-                for idx, file in enumerate(uploaded_files):
-                    status_text.text(f'กำลังประมวลผล: {file.name} ({idx+1}/{len(uploaded_files)})')
+                try:
+                    results = []
+                    progress_bar = st.progress(0)
+                    status_text = st.empty()
                     
-                    def update_progress(pct, msg):
-                        overall_pct = (idx + pct) / len(uploaded_files)
-                        progress_bar.progress(overall_pct)
-                        status_text.text(f'{msg} - {file.name}')
+                    for idx, file in enumerate(uploaded_files):
+                        status_text.text(f'กำลังประมวลผล: {file.name} ({idx+1}/{len(uploaded_files)})')
+                        
+                        def update_progress(pct, msg):
+                            overall_pct = (idx + pct) / len(uploaded_files)
+                            progress_bar.progress(min(overall_pct, 0.99))
+                            status_text.text(f'{msg} - {file.name}')
+                        
+                        result = process_cheque(file, reader, update_progress)
+                        results.append(result)
+                        
+                        # แสดง error ทันทีถ้ามี
+                        if 'error' in result:
+                            st.error(f'❌ {file.name}: {result["error"]}')
                     
-                    result = process_cheque(file, reader, update_progress)
-                    results.append(result)
+                    progress_bar.progress(1.0)
+                    status_text.text('✅ เสร็จสิ้น!')
+                    
+                    # แสดงผลลัพธ์
+                    st.success(f'ประมวลผลเสร็จสิ้น: {len(results)} ไฟล์')
+                    
+                    results_df = pd.DataFrame(results)
+                    st.dataframe(results_df, use_container_width=True)
+                    
+                    # ดาวน์โหลด CSV
+                    csv = results_df.to_csv(index=False, encoding='utf-8-sig')
+                    st.download_button(
+                        label='📥 ดาวน์โหลด CSV',
+                        data=csv,
+                        file_name=f'cheque_ocr_results_{datetime.now().strftime("%Y%m%d_%H%M%S")}.csv',
+                        mime='text/csv'
+                    )
                 
-                progress_bar.progress(1.0)
-                status_text.text('✅ เสร็จสิ้น!')
-                
-                # แสดงผลลัพธ์
-                st.success(f'ประมวลผลเสร็จสิ้น: {len(results)} ไฟล์')
-                
-                # สร้าง DataFrame
-                results_df = pd.DataFrame(results)
-                
-                # แสดงตาราง
-                st.dataframe(results_df, use_container_width=True)
-                
-                # ดาวน์โหลด CSV
-                csv = results_df.to_csv(index=False, encoding='utf-8-sig')
-                st.download_button(
-                    label='📥 ดาวน์โหลด CSV',
-                    data=csv,
-                    file_name=f'cheque_ocr_results_{datetime.now().strftime("%Y%m%d_%H%M%S")}.csv',
-                    mime='text/csv'
-                )
+                except Exception as e:
+                    st.error(f'❌ เกิดข้อผิดพลาด: {str(e)}')
+                    st.code(traceback.format_exc())
     
     # ==================== Tab 2: Template Processing ====================
     with tab2:
@@ -428,26 +422,18 @@ def main():
                             mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
                         )
         
-        # คำแนะนำ
         with st.expander('ℹ️ วิธีใช้งาน'):
             st.markdown("""
             **Tab 1: OCR Extraction**
             - อัพโหลดไฟล์เช็ค (PDF/Image)
-            - ระบบจะดึงข้อมูล: เลขเช็ค, รหัสธนาคาร, จำนวนเงิน, วันที่, ผู้รับเงิน
+            - กดปุ่ม "เริ่มประมวลผล"
             - ดาวน์โหลดผลลัพธ์เป็น CSV
             
             **Tab 2: Template Processing**
-            - อัพโหลด Template File (Excel ที่มี Sheet TR & Cash)
-            - อัพโหลด Data Source (Excel ที่มี Ref.No. และ Trading Name)
-            - ระบบจะเติมข้อมูลแบบ XLOOKUP อัตโนมัติ
-            - ดาวน์โหลดไฟล์ที่เติมข้อมูลแล้ว
-            
-            **หมายเหตุ:**
-            - จำกัด 5 ไฟล์ต่อครั้งสำหรับ OCR (เพื่อประสิทธิภาพ)
-            - รองรับ Thai & English text
-            - ใช้ MICR recognition สำหรับเลขเช็ค (มี fallback ถ้าโหลดไม่ได้)
+            - อัพโหลด Template File (Excel)
+            - อัพโหลด Data Source (Excel)
+            - กดปุ่ม "เติมข้อมูล"
             """)
 
 if __name__ == '__main__':
     main()
-
