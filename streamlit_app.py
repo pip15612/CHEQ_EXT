@@ -69,13 +69,17 @@ def download_e13b_traineddata():
         return False
 
 @st.cache_resource
+@st.cache_resource(show_spinner=False)
 def initialize_easyocr():
     """Initialize EasyOCR reader (cached)"""
     try:
-        reader = easyocr.Reader(['th', 'en'], gpu=False)
+        with st.spinner('🔄 กำลังโหลด OCR Model ครั้งแรก... (ใช้เวลา 2-3 นาที) กรุณารอสักครู่'):
+            reader = easyocr.Reader(['th', 'en'], gpu=False, verbose=False, download_enabled=True)
+        st.success('✅ โหลด EasyOCR สำเร็จ!')
         return reader
     except Exception as e:
         st.error(f'❌ ไม่สามารถโหลด EasyOCR ได้: {e}')
+        st.info('💡 ทดลองใช้ Tesseract แทน...')
         return None
 
 def clean_messy_date(text):
@@ -446,3 +450,4 @@ def main():
 
 if __name__ == '__main__':
     main()
+
