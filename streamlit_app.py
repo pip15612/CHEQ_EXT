@@ -230,7 +230,16 @@ def main():
             col1, col2 = st.columns([1, 1])
             
             with col1:
-                st.image(uploaded_file, caption="ไฟล์ที่อัปโหลด", use_container_width=True)
+                # แสดงตัวอย่างไฟล์ (แปลง PDF เป็นรูปภาพก่อน)
+                try:
+                    uploaded_file.seek(0)
+                    if uploaded_file.name.lower().endswith('.pdf'):
+                        images = convert_from_bytes(uploaded_file.read(), dpi=150)
+                        st.image(images[0], caption="ไฟล์ที่อัปโหลด (หน้าแรก)", use_container_width=True)
+                    else:
+                        st.image(uploaded_file, caption="ไฟล์ที่อัปโหลด", use_container_width=True)
+                except Exception as e:
+                    st.warning(f"⚠️ ไม่สามารถแสดงตัวอย่างไฟล์: {str(e)}")
             
             with col2:
                 if st.button("🚀 เริ่มประมวลผล", type="primary", use_container_width=True):
