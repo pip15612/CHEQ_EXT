@@ -1,4 +1,3 @@
-
 import streamlit as st
 import cv2
 import numpy as np
@@ -331,7 +330,7 @@ def extract_thai_data(image, reader):
 
 # ========== Main Process Function ==========
 def process_cheque(uploaded_file):
-    """ประมวลผลไฟล์เช็ค (PDF/Image)"""
+    """ประมวลผลไฟล์เช็ค (PDF/Image) - รองรับหลายหน้า"""
     try:
         # Initialize EasyOCR
         reader = initialize_easyocr()
@@ -341,50 +340,62 @@ def process_cheque(uploaded_file):
         
         # แปลง PDF เป็นภาพ
         st.info("📄 กำลังแปลงไฟล์...")
+        images = []
         if uploaded_file.name.lower().endswith('.pdf'):
-            images = convert_from_bytes(file_bytes, dpi=250)  # ลด DPI เพื่อประหยัด memory
-            image = images[0]
+            pdf_images = convert_from_bytes(file_bytes, dpi=250)
+            images = pdf_images  # เก็บทุกหน้า
         else:
-            image = Image.open(BytesIO(file_bytes))
+            images = [Image.open(BytesIO(file_bytes))]  # ใส่ใน list
         
-        # Resize ถ้าใหญ่เกินไป (memory optimization)
-        max_dim = 3000
-        if max(image.size) > max_dim:
-            ratio = max_dim / max(image.size)
-            new_size = (int(image.size[0] * ratio), int(image.size[1] * ratio))
-            image = image.resize(new_size, Image.Resampling.LANCZOS)
+        total_pages = len(images)
+        st.info(f"📄 พบ {total_pages} หน้า กำลังประมวลผล...")
         
-        # แปลงเป็น OpenCV format
-        cv_image = cv2.cvtColor(np.array(image), cv2.COLOR_RGB2BGR)
+        all_results = []
+        all_cropped = []
         
-        # Auto-crop
-        st.info("✂️ กำลัง crop เช็ค...")
-        cropped = robust_auto_crop(cv_image)
+        # ประมวลผลทีละหน้า
+        for page_num, image in enumerate(images, start=1):
+            st.info(f"📄 กำลังประมวลผลหน้า {page_num}/{total_pages}...")
+            
+            # Resize ถ้าใหญ่เกินไป (memory optimization)
+            max_dim = 3000
+            if max(image.size) > max_dim:
+                ratio = max_dim / max(image.size)
+                new_size = (int(image.size[0] * ratio), int(image.size[1] * ratio))
+                image = image.resize(new_size, Image.Resampling.LANCZOS)
+            
+            # แปลงเป็น OpenCV format
+            cv_image = cv2.cvtColor(np.array(image), cv2.COLOR_RGB2BGR)
+            
+            # Auto-crop
+            cropped = robust_auto_crop(cv_image)
+            all_cropped.append(cropped)
+            
+            # Extract data
+            data = extract_thai_data(cropped, reader)
+            
+            # Extract MICR
+            micr_raw = extract_micr(cropped)
+            cheque_digit = extract_cheque_digit(micr_raw)
+            chq_no, bank_cd, br_cd, acc_no = parse_micr_thai(micr_raw)
+            
+            result = {
+                "หน้า": page_num,
+                "วันที่": data["Date"],
+                "ผู้รับเงิน": data["Payee"],
+                "จำนวนเงิน": data["Amount_Num"],
+                "จำนวนเงิน (คำอ่าน)": data["Amount_Text"],
+                "Cheque digit": cheque_digit,
+                "หมายเลขเช็ค": chq_no,
+                "รหัสธนาคาร": bank_cd,
+                "รหัสสาขา": br_cd,
+                "เลขบัญชี": acc_no,
+                "MICR (ดิบ)": micr_raw[:100]
+            }
+            
+            all_results.append(result)
         
-        # Extract data
-        st.info("🔍 กำลังดึงข้อความจากเช็ค...")
-        data = extract_thai_data(cropped, reader)
-        
-        # Extract MICR
-        st.info("🔢 กำลังดึง MICR code...")
-        micr_raw = extract_micr(cropped)
-        cheque_digit = extract_cheque_digit(micr_raw)
-        chq_no, bank_cd, br_cd, acc_no = parse_micr_thai(micr_raw)
-        
-        result = {
-            "วันที่": data["Date"],
-            "ผู้รับเงิน": data["Payee"],
-            "จำนวนเงิน": data["Amount_Num"],
-            "จำนวนเงิน (คำอ่าน)": data["Amount_Text"],
-            "Cheque digit": cheque_digit,
-            "หมายเลขเช็ค": chq_no,
-            "รหัสธนาคาร": bank_cd,
-            "รหัสสาขา": br_cd,
-            "เลขบัญชี": acc_no,
-            "MICR (ดิบ)": micr_raw[:100]
-        }
-        
-        return result, cropped
+        return all_results, all_cropped
         
     except Exception as e:
         st.error(f"❌ เกิดข้อผิดพลาด: {str(e)}")
@@ -464,18 +475,17 @@ def main():
             with col2:
                 if st.button("🚀 เริ่มประมวลผล", type="primary", use_container_width=True):
                     with st.spinner("⏳ กำลังประมวลผล... (EasyOCR ครั้งแรกใช้เวลา 2-3 นาที)"):
-                        result, cropped = process_cheque(uploaded_file)
+                        all_results, all_cropped = process_cheque(uploaded_file)
                         
-                        if result:
-                            st.success("✅ ประมวลผลสำเร็จ!")
+                        if all_results:
+                            st.success(f"✅ ประมวลผลสำเร็จ! พบ {len(all_results)} หน้า")
                             
-                            # แสดงผล
-                            df_result = pd.DataFrame([result]).T
-                            df_result.columns = ['ข้อมูล']
+                            # แสดงผลเป็นตาราง
+                            df_result = pd.DataFrame(all_results)
                             st.dataframe(df_result, use_container_width=True)
                             
                             # Download CSV
-                            csv = pd.DataFrame([result]).to_csv(index=False, encoding='utf-8-sig')
+                            csv = df_result.to_csv(index=False, encoding='utf-8-sig')
                             st.download_button(
                                 label="📥 ดาวน์โหลด CSV",
                                 data=csv,
@@ -483,9 +493,37 @@ def main():
                                 mime="text/csv"
                             )
                             
-                            # แสดงภาพที่ crop แล้ว
-                            with st.expander("🖼️ ดูภาพที่ Crop แล้ว"):
-                                st.image(cv2.cvtColor(cropped, cv2.COLOR_BGR2RGB), use_container_width=True)
+                            # Download Excel (with text format)
+                            output = BytesIO()
+                            with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
+                                df_result.to_excel(writer, sheet_name='Cheques', index=False)
+                                
+                                workbook = writer.book
+                                worksheet = writer.sheets['Cheques']
+                                text_format = workbook.add_format({'num_format': '@'})
+                                
+                                # ตั้งค่าคอลัมน์ที่เป็นตัวเลขให้เป็น text
+                                for col_name in ["หมายเลขเช็ค", "เลขบัญชี", "Cheque digit", "รหัสธนาคาร", "รหัสสาขา"]:
+                                    if col_name in df_result.columns:
+                                        col_idx = df_result.columns.get_loc(col_name)
+                                        worksheet.set_column(col_idx, col_idx, 20, text_format)
+                            
+                            output.seek(0)
+                            st.download_button(
+                                label="📥 ดาวน์โหลด Excel",
+                                data=output,
+                                file_name="cheque_data.xlsx",
+                                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                            )
+                            
+                            # แสดงภาพที่ crop แล้ว (ทุกหน้า)
+                            with st.expander("🖼️ ดูภาพที่ Crop แล้ว (ทุกหน้า)"):
+                                for idx, cropped in enumerate(all_cropped, start=1):
+                                    st.image(
+                                        cv2.cvtColor(cropped, cv2.COLOR_BGR2RGB), 
+                                        caption=f"หน้า {idx}",
+                                        use_container_width=True
+                                    )
     
     # ===== TAB 2: Template Filling =====
     with tab2:
