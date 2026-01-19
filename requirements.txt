@@ -1,5 +1,4 @@
---extra-index-url https://download.pytorch.org/whl/cpu
-
+# Streamlit Cloud Requirements
 streamlit>=1.31.0
 pandas>=2.0.0
 openpyxl>=3.1.0
@@ -9,13 +8,7 @@ requests>=2.31.0
 pdf2image>=1.16.0
 Pillow>=10.0.0
 
-# OCR Dependencies
+# OCR Dependencies (EasyOCR will install torch automatically)
 opencv-python-headless>=4.8.0
 pytesseract>=0.3.10
-
-# Force CPU only versions for PyTorch before installing EasyOCR
-torch==2.0.1+cpu
-torchvision==0.15.2+cpu
-
-# EasyOCR (install last)
 easyocr>=1.7.0
