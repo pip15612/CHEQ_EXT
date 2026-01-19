@@ -11,8 +11,8 @@ import requests
 from io import BytesIO
 import tempfile
 from datetime import datetime
-from pprint import pprint
 import time
+import shutil
 
 # =============================================================================
 # Configuration
@@ -25,28 +25,49 @@ TESSERACT_CMD = r'C:\Program Files\Tesseract-OCR\tesseract.exe' if os.name == 'n
 # Helper Functions
 # =============================================================================
 def download_e13b_traineddata():
-    """โหลด e13b.traineddata จาก repo แล้วคัดลอกไปยัง /tmp/"""
+    """โหลด e13b.traineddata จาก repo แล้วคัดลอกไปยัง /tmp/tessdata"""
     tessdata_path = '/tmp/tessdata'
-    os.makedirs(tessdata_path, exist_ok=True)
+    
+    try:
+        os.makedirs(tessdata_path, exist_ok=True)
+    except Exception as e:
+        st.warning(f'⚠️ ไม่สามารถสร้าง tessdata folder: {e}')
+        return False
     
     e13b_file = os.path.join(tessdata_path, 'e13b.traineddata')
+    
+    # ตั้งค่า TESSDATA_PREFIX ให้ Tesseract รู้ว่าไฟล์อยู่ที่ไหน
     os.environ['TESSDATA_PREFIX'] = '/tmp/'
     
     if os.path.exists(e13b_file):
-        st.success('✅ MICR model พร้อมใช้งาน')
+        st.success('✅ MICR model พร้อมใช้งานแล้ว')
         return True
     
-    # คัดลอกจากไฟล์ใน repo
-    local_e13b = 'tessdata/e13b.traineddata'
-    if os.path.exists(local_e13b):
-        import shutil
-        shutil.copy(local_e13b, e13b_file)
-        st.success('✅ โหลด MICR model สำเร็จ')
-        return True
-    else:
-        st.warning('⚠️ ไม่พบ e13b.traineddata ใน repo')
+    st.info('🔄 กำลังโหลด MICR recognition model...')
+    
+    # ไฟล์อยู่ที่ root ของ repo
+    local_e13b = 'e13b.traineddata'
+    
+    try:
+        if os.path.exists(local_e13b):
+            shutil.copy(local_e13b, e13b_file)
+            st.success('✅ โหลด MICR model สำเร็จ!')
+            return True
+        else:
+            st.warning('⚠️ ไม่พบ e13b.traineddata ใน repo')
+            # ลองดาวน์โหลดจาก GitHub ถ้าไม่มีในไฟล์
+            url = "https://github.com/DoubangoTelecom/tesseractMICR/raw/master/tessdata_best/e13b.traineddata"
+            r = requests.get(url, timeout=60)
+            if r.status_code == 200:
+                with open(e13b_file, 'wb') as f:
+                    f.write(r.content)
+                st.success('✅ ดาวน์โหลด MICR model สำเร็จ!')
+                return True
+            return False
+    except Exception as e:
+        st.warning(f'⚠️ ไม่สามารถโหลด e13b.traineddata ได้: {str(e)}')
         return False
-        
+
 @st.cache_resource
 def initialize_easyocr():
     """Initialize EasyOCR reader (cached)"""
@@ -92,7 +113,7 @@ def clean_messy_date(text):
 def extract_micr(image_np):
     """ดึงข้อมูล MICR จากด้านล่างของเช็ค"""
     try:
-        # ตั้งค่า tesseract command และ TESSDATA_PREFIX
+        # ตั้งค่า tesseract command
         if os.name == 'nt' and os.path.exists(TESSERACT_CMD):
             pytesseract.pytesseract.tesseract_cmd = TESSERACT_CMD
         
@@ -105,6 +126,7 @@ def extract_micr(image_np):
         gray = cv2.cvtColor(micr_roi, cv2.COLOR_BGR2GRAY)
         _, binary = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
         
+        # ลองใช้ e13b ก่อน ถ้าไม่ได้ใช้ eng แทน
         try:
             micr_text = pytesseract.image_to_string(binary, lang='e13b', config='--psm 6')
         except:
@@ -424,4 +446,3 @@ def main():
 
 if __name__ == '__main__':
     main()
-
