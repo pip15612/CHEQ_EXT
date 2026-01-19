@@ -26,35 +26,57 @@ TESSERACT_CMD = r'C:\Program Files\Tesseract-OCR\tesseract.exe' if os.name == 'n
 # =============================================================================
 def download_e13b_traineddata():
     """ดาวน์โหลด e13b.traineddata สำหรับ MICR OCR"""
-    tessdata_path = os.path.join(os.path.dirname(pytesseract.pytesseract.tesseract_cmd), 'tessdata')
-    if os.name != 'nt':
-        tessdata_path = '/usr/share/tesseract-ocr/5/tessdata'
+    # ลอง path หลายแบบเพื่อให้ทำงานได้ทั้ง Streamlit Cloud และ local
+    possible_paths = [
+        '/usr/share/tesseract-ocr/4.00/tessdata',
+        '/usr/share/tesseract-ocr/5/tessdata',
+        '/usr/share/tessdata',
+        os.path.join(os.path.dirname(pytesseract.pytesseract.tesseract_cmd), 'tessdata') if os.name == 'nt' else None
+    ]
     
-    os.makedirs(tessdata_path, exist_ok=True)
+    tessdata_path = None
+    for path in possible_paths:
+        if path and (os.path.exists(path) or not os.name == 'nt'):
+            tessdata_path = path
+            break
+    
+    if not tessdata_path:
+        tessdata_path = '/usr/share/tesseract-ocr/4.00/tessdata'
+    
+    try:
+        os.makedirs(tessdata_path, exist_ok=True)
+    except:
+        pass
+    
     e13b_file = os.path.join(tessdata_path, 'e13b.traineddata')
     
     if os.path.exists(e13b_file):
+        st.success('✅ MICR model พร้อมใช้งานแล้ว')
         return True
     
-    st.info('กำลังดาวน์โหลด MICR recognition model...')
-    urls = [
-        'https://github.com/Shreeshrii/tessdata_shreetest/raw/master/e13b.traineddata',
-        'https://raw.githubusercontent.com/tesseract-ocr/tessdata/main/e13b.traineddata'
-    ]
+    st.info('🔄 กำลังดาวน์โหลด MICR recognition model...')
     
-    for url in urls:
-        try:
-            response = requests.get(url, timeout=30)
-            if response.status_code == 200:
-                with open(e13b_file, 'wb') as f:
-                    f.write(response.content)
-                st.success('✅ ดาวน์โหลด MICR model สำเร็จ')
-                return True
-        except Exception as e:
-            continue
+    # URL ที่ใช้ได้จริง
+    url = "https://github.com/DoubangoTelecom/tesseractMICR/raw/master/tessdata_best/e13b.traineddata"
     
-    st.warning('⚠️ ไม่สามารถดาวน์โหลด e13b.traineddata ได้ - MICR อาจทำงานไม่ได้')
-    return False
+    try:
+        print(f"Downloading from: {url}")
+        print(f"Target path: {e13b_file}")
+        
+        r = requests.get(url, timeout=60)
+        if r.status_code == 200:
+            with open(e13b_file, 'wb') as f:
+                f.write(r.content)
+            st.success('✅ ดาวน์โหลด MICR model สำเร็จ!')
+            print(f"Successfully downloaded to {e13b_file}")
+            return True
+        else:
+            st.warning(f'⚠️ ดาวน์โหลดไม่สำเร็จ (Status: {r.status_code}) - MICR อาจทำงานไม่เต็มประสิทธิภาพ')
+            return False
+    except Exception as e:
+        st.warning(f'⚠️ ไม่สามารถดาวน์โหลด e13b.traineddata ได้: {str(e)}')
+        print(f"Download error: {e}")
+        return False
 
 @st.cache_resource
 def initialize_easyocr():
@@ -109,7 +131,13 @@ def extract_micr(image_np):
         gray = cv2.cvtColor(micr_roi, cv2.COLOR_BGR2GRAY)
         _, binary = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
         
-        micr_text = pytesseract.image_to_string(binary, lang='e13b', config='--psm 6')
+        # ลองใช้ e13b ก่อน ถ้าไม่ได้ใช้ eng แทน
+        try:
+            micr_text = pytesseract.image_to_string(binary, lang='e13b', config='--psm 6')
+        except:
+            # Fallback ใช้ eng ถ้า e13b ไม่มี
+            micr_text = pytesseract.image_to_string(binary, lang='eng', config='--psm 6 -c tessedit_char_whitelist=0123456789')
+        
         return micr_text.strip()
     except Exception as e:
         if DEBUG:
@@ -418,7 +446,7 @@ def main():
             **หมายเหตุ:**
             - จำกัด 5 ไฟล์ต่อครั้งสำหรับ OCR (เพื่อประสิทธิภาพ)
             - รองรับ Thai & English text
-            - ใช้ MICR recognition สำหรับเลขเช็ค
+            - ใช้ MICR recognition สำหรับเลขเช็ค (มี fallback ถ้าโหลดไม่ได้)
             """)
 
 if __name__ == '__main__':
