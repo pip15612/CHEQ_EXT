@@ -412,12 +412,17 @@ def process_template_filling(pdf_file, fchn_file, master_file, template_file, bu
         # Process each row for TR Teams
         total_rows = len(pdf_df)
         
+        st.info(f"📊 เริ่มประมวลผล TR Teams: พบ {total_rows} แถว")
+        
         for idx, pdf_row in pdf_df.iterrows():
             row_num = start_row + idx
             
-            cheque_number = str(pdf_row['หมายเลขเช็ค'])
-            amount = pdf_row['จำนวนเงิน']
-            account_number = str(pdf_row['เลขบัญชี'])
+            try:
+                cheque_number = str(pdf_row['หมายเลขเช็ค'])
+                amount = pdf_row['จำนวนเงิน']
+                account_number = str(pdf_row['เลขบัญชี'])
+                
+                st.info(f"⚙️ กำลังประมวลผลแถว {idx+1}/{total_rows} - เช็ค: {cheque_number}, บัญชี: {account_number}")
             
             # Determine Business Partner
             if business_partner:
@@ -478,12 +483,25 @@ def process_template_filling(pdf_file, fchn_file, master_file, template_file, bu
             s_result = xlookup(account_number, master_df.iloc[:, 4], master_df.iloc[:, 1])
             if s_result is not None:
                 template_sheet.cell(row_num, 19).value = str(s_result).zfill(4)
+                
+            except Exception as e:
+        st.info(f"📊 เริ่มประมวลผล Cash Teams: พบ {total_rows} แถว")
         
-        # Process Cash Teams sheet
         max_row = cash_sheet.max_row
         for row in range(6, max_row + 1):
             for col in range(1, 40):
                 cash_sheet.cell(row, col).value = None
+        
+        cash_start_row = 6
+        for idx, pdf_row in pdf_df.iterrows():
+            cash_row = cash_start_row + idx
+            
+            try:
+                cheque_number = str(pdf_row['หมายเลขเช็ค'])
+                amount = pdf_row['จำนวนเงิน']
+                account_number = str(pdf_row['เลขบัญชี'])
+                
+                st.info(f"⚙️ กำลังประมวลผลแถว {idx+1}/{total_rows} - เช็ค: {cheque_number}"ne
         
         cash_start_row = 6
         for idx, pdf_row in pdf_df.iterrows():
@@ -530,6 +548,13 @@ def process_template_filling(pdf_file, fchn_file, master_file, template_file, bu
                 cash_sheet.cell(cash_row, 4).value = bank_name_only
             
             # H: Assignment
+                
+            except Exception as e:
+                st.error(f"❌ ข้อผิดพลาดที่แถว {idx+1} (Cash): {str(e)}")
+                st.code(traceback.format_exc())
+                continue
+        
+        st.success(f"✅ Cash Teams: เติมข้อมูลเสร็จสิ้น {total_rows} แถว")
             cash_sheet.cell(cash_row, 8).value = f"CHQ{cheque_number}"
             
             # I: Business Partner
@@ -682,7 +707,13 @@ def main():
                     with st.spinner("⏳ กำลังประมวลผล Template..."):
                         output, total_rows = process_template_filling(
                             pdf_file,
-                            fchn_file,
+                            fchn_file,")
+                            st.info(f"""
+                            📋 สรุปผลการประมวลผล:
+                            - จำนวนแถวที่ประมวลผล: {total_rows} แถว
+                            - TR Teams: แถว {11} ถึง {11 + total_rows - 1}
+                            - Cash Teams: แถว {6} ถึง {6 + total_rows - 1}
+                            ""
                             master_file,
                             template_file,
                             business_partner.strip()
