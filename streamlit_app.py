@@ -6,12 +6,17 @@ import easyocr
 from pdf2image import convert_from_bytes
 from PIL import Image
 import pandas as pd
+import openpyxl
 import re
 from io import BytesIO
 import os
 import traceback
 import shutil
 from pathlib import Path
+from datetime import datetime
+
+# ========== Page Config ==========
+st.set_page_config(page_title="Thai Cheque OCR", page_icon="🏦", layout="wide")
 
 # ========== Setup Tessdata for MICR ==========
 @st.cache_resource
@@ -66,10 +71,7 @@ def clean_messy_date(text):
     if not text:
         return ""
     
-    # Remove prefixes
     text = re.sub(r'(?i)(วันที่|วันที|date|of)\s*[:\-]?\s*', '', text).strip()
-    
-    # Skip template lines
     if _is_template_date_line(text):
         return ""
     
@@ -84,18 +86,7 @@ def clean_messy_date(text):
         if out:
             return out
     
-    # (2) dd mm yyyy (spaces only)
-    m2 = re.search(r'(\d{1,2})\s+(\d{1,2})\s+(\d{2,4})', text)
-    if m2:
-        d, mo, y = m2.group(1), m2.group(2), m2.group(3)
-        if len(d) == 1: d = "0" + d
-        if len(mo) == 1: mo = "0" + mo
-        if len(y) == 2: y = "20" + y
-        out = _validate_date(d, mo, y)
-        if out:
-            return out
-    
-    # (3) Sliding 8-digit window
+    # (2) Sliding 8-digit window
     digits = "".join([c for c in text if c.isdigit()])
     if len(digits) >= 8:
         for start in range(0, len(digits) - 8 + 1):
@@ -105,47 +96,31 @@ def clean_messy_date(text):
             if out:
                 return out
     
-    # (4) 7-digit heuristic
-    if len(digits) == 7:
-        year = digits[-4:]
-        prefix = digits[:-4]
-        out1 = _validate_date("0"+prefix[0], prefix[1:], year)
-        if out1:
-            return out1
-        out2 = _validate_date(prefix[:2], "0"+prefix[2], year)
-        if out2:
-            return out2
-    
     return ""
 
 def extract_cheque_digit(micr_text):
-    """Cheque digit = 2 ตัวแรกของ MICR"""
     if not micr_text:
         return ""
     digits = "".join(c for c in micr_text if c.isdigit())
     return digits[:2] if len(digits) >= 2 else ""
 
 def parse_micr_thai(micr_text):
-    """Parse MICR: [txn][cheque][bank][branch][account]"""
     parts = [re.sub(r'[^\d]', '', p.strip())
              for p in re.split(r'[⑆⑇⑈⑉]', micr_text)
              if p.strip()]
     
     chq_no = bank_cd = branch_cd = acc_no = ""
-    
     if len(parts) < 2:
         return chq_no, bank_cd, branch_cd, acc_no
     
     chq_no = parts[1]
     
-    # Case B: bank + branch separate
     if len(parts) >= 5 and len(parts[2]) == 3:
         bank_cd = parts[2]
         branch_cd = parts[3]
         acc_no = parts[4]
         return chq_no, bank_cd, branch_cd, acc_no
     
-    # Case A: bank+branch combined
     if len(parts) >= 3:
         raw = parts[2]
         if len(raw) >= 3:
@@ -162,20 +137,16 @@ def parse_micr_thai(micr_text):
     return chq_no, bank_cd, branch_cd, acc_no
 
 def clean_amount_garbage(text):
-    """ลบคำที่ไม่เกี่ยวข้องออกจากจำนวนเงินคำอ่าน"""
     text = re.sub(r'(?i)(baht|bath|amount|จ่าย|pay|[^ก-๙\s])', '', text)
     return text.replace("*", "").replace("=", "").strip()
 
 def clean_payee_final(text):
-    """แก้ typo ชื่อผู้รับเงิน"""
     typos = {"บรบท": "บริษัท", "บริบัท": "บริษัท", "จากัด": "จำกัด"}
     for w, c in typos.items():
         text = text.replace(w, c)
     return re.sub(r'(หรือผู้ถือ|Or Bearer).*$', '', text, flags=re.IGNORECASE).strip(" .-_^$#/")
 
-# ========== Image Processing ==========
 def robust_auto_crop(image):
-    """Auto-crop เช็คออกจากพื้นหลัง"""
     img_h, img_w = image.shape[:2]
     gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
     blur = cv2.GaussianBlur(gray, (7, 7), 0)
@@ -195,12 +166,10 @@ def robust_auto_crop(image):
     return image[int(img_h*0.15):int(img_h*0.85), int(img_w*0.02):int(img_w*0.98)]
 
 def crop_micr_region(image_bgr):
-    """Crop MICR region (ส่วนล่าง 22%)"""
     h, w = image_bgr.shape[:2]
     return image_bgr[int(h * 0.78):h, 0:w]
 
 def extract_micr(image):
-    """Extract MICR code ด้วย Tesseract e13b"""
     crop = crop_micr_region(image)
     gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
     _, thresh = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
@@ -221,7 +190,6 @@ def extract_micr(image):
         except:
             return ""
     
-    # Map A/B/C/D to MICR symbols
     mapping = {'A': '⑆', 'B': '⑇', 'C': '⑈', 'D': '⑉'}
     for k, v in mapping.items():
         micr_text = micr_text.replace(k, v).replace(k.lower(), v)
@@ -229,7 +197,6 @@ def extract_micr(image):
     return "".join([c for c in micr_text if c in "0123456789⑆⑇⑈⑉ "])
 
 def group_text_into_lines(ocr_results):
-    """จัดกลุ่มข้อความเป็นบรรทัด"""
     lines = []
     sorted_res = sorted(ocr_results, key=lambda r: r[0][0][1])
     
@@ -252,7 +219,6 @@ def group_text_into_lines(ocr_results):
     
     return lines
 
-# ========== Core Extraction Engine ==========
 def extract_thai_data(image, reader):
     """ดึงข้อมูลหลักจากเช็ค"""
     img_h, img_w, _ = image.shape
@@ -266,7 +232,7 @@ def extract_thai_data(image, reader):
     for i, line in enumerate(lines):
         full_line_text = " ".join([item[1] for item in line]).strip()
         
-        # === DATE EXTRACTION ===
+        # Date extraction
         date_kw_hit = (
             ("วันที่" in full_line_text) or 
             ("วันที" in full_line_text) or
@@ -278,32 +244,14 @@ def extract_thai_data(image, reader):
                 d0 = clean_messy_date(full_line_text)
                 if d0:
                     data["Date"] = d0
-                else:
-                    # Look ahead 1-2 lines
-                    for k in [1, 2]:
-                        if i + k < len(lines):
-                            nxt = " ".join([item[1] for item in lines[i + k]]).strip()
-                            if not _is_template_date_line(nxt):
-                                dt = clean_messy_date(full_line_text + " " + nxt)
-                                if dt:
-                                    data["Date"] = dt
-                                    break
         
-        # Date fallback
-        if not data["Date"]:
-            digit_count = len(re.findall(r"\d", full_line_text))
-            if digit_count >= 6 and not _is_template_date_line(full_line_text):
-                dt = clean_messy_date(full_line_text)
-                if dt:
-                    data["Date"] = dt
-        
-        # === AMOUNT TEXT ===
+        # Amount text
         if any(k in full_line_text for k in money_kws) and re.search(r'[ก-๙]', full_line_text):
             cleaned = clean_amount_garbage(full_line_text)
             if len(cleaned) > len(data["Amount_Text"]):
                 data["Amount_Text"] = cleaned
         
-        # === PAYEE ===
+        # Payee
         pay_kws = ["จ่าย", "Pay", "แก่", "to"]
         if any(kw in full_line_text for kw in pay_kws) and not any(k in full_line_text for k in money_kws):
             name = full_line_text
@@ -313,7 +261,7 @@ def extract_thai_data(image, reader):
             if len(name) > 2 and not data["Payee"]:
                 data["Payee"] = clean_payee_final(name)
     
-    # === AMOUNT NUMBER (ไม่ verify กับคำอ่าน) ===
+    # Amount number
     for line in lines:
         for bbox, text in line:
             if (bbox[0][0] + bbox[1][0]) / 2 > img_w * 0.5:
@@ -328,24 +276,22 @@ def extract_thai_data(image, reader):
     
     return data
 
-# ========== Main Process Function ==========
+# ========== Process Cheque (OCR) ==========
 def process_cheque(uploaded_file):
-    """ประมวลผลไฟล์เช็ค (PDF/Image) - รองรับหลายหน้า"""
+    """ประมวลผลไฟล์เช็ค - รองรับหลายหน้า"""
     try:
-        # Initialize EasyOCR
         reader = initialize_easyocr()
         
         uploaded_file.seek(0)
         file_bytes = uploaded_file.read()
         
-        # แปลง PDF เป็นภาพ
         st.info("📄 กำลังแปลงไฟล์...")
         images = []
         if uploaded_file.name.lower().endswith('.pdf'):
             pdf_images = convert_from_bytes(file_bytes, dpi=250)
-            images = pdf_images  # เก็บทุกหน้า
+            images = pdf_images
         else:
-            images = [Image.open(BytesIO(file_bytes))]  # ใส่ใน list
+            images = [Image.open(BytesIO(file_bytes))]
         
         total_pages = len(images)
         st.info(f"📄 พบ {total_pages} หน้า กำลังประมวลผล...")
@@ -353,28 +299,20 @@ def process_cheque(uploaded_file):
         all_results = []
         all_cropped = []
         
-        # ประมวลผลทีละหน้า
         for page_num, image in enumerate(images, start=1):
             st.info(f"📄 กำลังประมวลผลหน้า {page_num}/{total_pages}...")
             
-            # Resize ถ้าใหญ่เกินไป (memory optimization)
             max_dim = 3000
             if max(image.size) > max_dim:
                 ratio = max_dim / max(image.size)
                 new_size = (int(image.size[0] * ratio), int(image.size[1] * ratio))
                 image = image.resize(new_size, Image.Resampling.LANCZOS)
             
-            # แปลงเป็น OpenCV format
             cv_image = cv2.cvtColor(np.array(image), cv2.COLOR_RGB2BGR)
-            
-            # Auto-crop
             cropped = robust_auto_crop(cv_image)
             all_cropped.append(cropped)
             
-            # Extract data
             data = extract_thai_data(cropped, reader)
-            
-            # Extract MICR
             micr_raw = extract_micr(cropped)
             cheque_digit = extract_cheque_digit(micr_raw)
             chq_no, bank_cd, br_cd, acc_no = parse_micr_thai(micr_raw)
@@ -402,47 +340,217 @@ def process_cheque(uploaded_file):
         st.code(traceback.format_exc())
         return None, None
 
-def process_template_filling(data_file, template_file):
-    """ประมวลผล Template Filling"""
+# ========== XLOOKUP Function ==========
+def xlookup(lookup_value, lookup_array, return_array, if_not_found=None):
+    """Mimics Excel's XLOOKUP function with automatic type conversion"""
     try:
-        df_data = pd.read_excel(data_file)
+        if not isinstance(lookup_array, pd.Series):
+            lookup_array = pd.Series(lookup_array)
+        if not isinstance(return_array, pd.Series):
+            return_array = pd.Series(return_array)
         
-        with pd.ExcelFile(template_file) as xls:
-            df_tr = pd.read_excel(xls, 'TR')
-            df_cash = pd.read_excel(xls, 'Cash')
+        if isinstance(lookup_value, (int, float)):
+            try:
+                lookup_array_numeric = pd.to_numeric(lookup_array, errors='coerce')
+                mask = lookup_array_numeric == lookup_value
+            except:
+                mask = lookup_array == lookup_value
+        else:
+            mask = lookup_array == lookup_value
+            if not mask.any() and isinstance(lookup_value, str) and lookup_value.replace('.','').replace('-','').isdigit():
+                try:
+                    lookup_array_numeric = pd.to_numeric(lookup_array, errors='coerce')
+                    lookup_value_numeric = pd.to_numeric(lookup_value, errors='coerce')
+                    mask = lookup_array_numeric == lookup_value_numeric
+                except:
+                    pass
         
-        lookup_dict = df_data.set_index('รหัสบุคคล')[['ชื่อ', 'จำนวนเงิน', 'หมายเหตุ']].to_dict('index')
+        if mask.any():
+            idx = mask.idxmax()
+            return return_array.iloc[idx]
+        else:
+            return if_not_found
+    except:
+        return if_not_found
+
+# ========== Process Template Filling ==========
+def process_template_filling(pdf_file, fchn_file, master_file, template_file, business_partner=""):
+    """ประมวลผล Template Filling - เหมือนกับ GUI"""
+    try:
+        # Load Template
+        template_wb = openpyxl.load_workbook(template_file)
+        template_sheet = template_wb['TEMPLATE (TR Teams) ']
+        cash_sheet = template_wb['TEMPLATE (Cash Teams)']
         
-        def xlookup(code, field):
-            if pd.notna(code) and code in lookup_dict:
-                return lookup_dict[code].get(field, '')
-            return ''
+        # Load data files
+        pdf_df = pd.read_excel(pdf_file, sheet_name=0, dtype=str)
         
-        df_tr['ชื่อ'] = df_tr['รหัสบุคคล'].apply(lambda x: xlookup(x, 'ชื่อ'))
-        df_tr['จำนวนเงิน'] = df_tr['รหัสบุคคล'].apply(lambda x: xlookup(x, 'จำนวนเงิน'))
-        df_tr['หมายเหตุ'] = df_tr['รหัสบุคคล'].apply(lambda x: xlookup(x, 'หมายเหตุ'))
+        # Map column names (ภาษาไทย หรือ อังกฤษ)
+        column_mapping = {
+            'เลขบัญชี': 'เลขบัญชี',
+            'Account number': 'เลขบัญชี',
+            'หมายเลขเช็ค': 'หมายเลขเช็ค',
+            'Cheque Number': 'หมายเลขเช็ค',
+            'จำนวนเงิน': 'จำนวนเงิน',
+            'Amount': 'จำนวนเงิน'
+        }
         
-        df_cash['ชื่อ'] = df_cash['รหัสบุคคล'].apply(lambda x: xlookup(x, 'ชื่อ'))
-        df_cash['จำนวนเงิน'] = df_cash['รหัสบุคคล'].apply(lambda x: xlookup(x, 'จำนวนเงิน'))
-        df_cash['หมายเหตุ'] = df_cash['รหัสบุคคล'].apply(lambda x: xlookup(x, 'หมายเหตุ'))
+        for old_name, new_name in column_mapping.items():
+            if old_name in pdf_df.columns:
+                pdf_df = pdf_df.rename(columns={old_name: new_name})
         
+        fchn_df = pd.read_excel(fchn_file, sheet_name=0, dtype=str)
+        master_df = pd.read_excel(master_file, sheet_name=0, dtype=str)
+        
+        # Clear existing data in TR Teams
+        start_row = 11
+        end_row = template_sheet.max_row
+        for row_num in range(start_row, end_row + 1):
+            for col_num in range(1, 35):
+                template_sheet.cell(row_num, col_num).value = None
+        
+        # Process each row for TR Teams
+        total_rows = len(pdf_df)
+        
+        for idx, pdf_row in pdf_df.iterrows():
+            row_num = start_row + idx
+            
+            cheque_number = str(pdf_row['หมายเลขเช็ค'])
+            amount = pdf_row['จำนวนเงิน']
+            account_number = str(pdf_row['เลขบัญชี'])
+            
+            # Determine Business Partner
+            if business_partner:
+                bp = business_partner
+            else:
+                bp = xlookup(account_number, master_df.iloc[:, 4], master_df.iloc[:, 6])
+            
+            # Fill Business Partner to Template
+            if bp:
+                template_sheet.cell(row_num, 2).value = str(bp)
+            
+            template_sheet.cell(row_num, 6).value = "23.12.2025"
+            template_sheet.cell(row_num, 10).value = "23.12.2025"
+            template_sheet.cell(row_num, 8).value = amount
+            template_sheet.cell(row_num, 15).value = f"CHQ{cheque_number}"
+            template_sheet.cell(row_num, 31).value = str(account_number)
+            
+            # Lookups from FCHN
+            cheque_str = str(cheque_number)
+            cheque_last8 = int(cheque_str[-8:]) if len(cheque_str) >= 8 else int(cheque_str)
+            
+            p_result = xlookup(cheque_last8, fchn_df.iloc[:, 0], fchn_df.iloc[:, 5])
+            if p_result is not None:
+                template_sheet.cell(row_num, 16).value = str(p_result)
+            
+            # Lookups from Master
+            if bp:
+                lookup_key = str(bp) + str(account_number)
+                
+                i_result = xlookup(lookup_key, master_df.iloc[:, 12], master_df.iloc[:, 11])
+                if i_result is not None:
+                    template_sheet.cell(row_num, 9).value = str(i_result)
+                
+                k_result = xlookup(lookup_key, master_df.iloc[:, 12], master_df.iloc[:, 7])
+                if k_result is not None:
+                    template_sheet.cell(row_num, 11).value = str(k_result)
+                    template_sheet.cell(row_num, 17).value = str(k_result)
+                
+                y_result = xlookup(lookup_key, master_df.iloc[:, 12], master_df.iloc[:, 8])
+                if y_result is not None:
+                    template_sheet.cell(row_num, 25).value = str(y_result)
+                    template_sheet.cell(row_num, 37).value = str(y_result)
+                
+                ac_result = xlookup(lookup_key, master_df.iloc[:, 12], master_df.iloc[:, 10])
+                if ac_result is not None:
+                    template_sheet.cell(row_num, 29).value = str(ac_result)
+            
+            # Company Code to Column A
+            a_result = xlookup(account_number, master_df.iloc[:, 4], master_df.iloc[:, 0])
+            if a_result is not None:
+                template_sheet.cell(row_num, 1).value = str(a_result)
+            
+            # Cost Center to Column R
+            r_result = xlookup(account_number, master_df.iloc[:, 4], master_df.iloc[:, 9])
+            if r_result is not None:
+                template_sheet.cell(row_num, 18).value = str(r_result)
+            
+            s_result = xlookup(account_number, master_df.iloc[:, 4], master_df.iloc[:, 1])
+            if s_result is not None:
+                template_sheet.cell(row_num, 19).value = str(s_result).zfill(4)
+        
+        # Process Cash Teams sheet
+        max_row = cash_sheet.max_row
+        for row in range(6, max_row + 1):
+            for col in range(1, 40):
+                cash_sheet.cell(row, col).value = None
+        
+        cash_start_row = 6
+        for idx, pdf_row in pdf_df.iterrows():
+            cash_row = cash_start_row + idx
+            
+            cheque_number = str(pdf_row['หมายเลขเช็ค'])
+            amount = pdf_row['จำนวนเงิน']
+            account_number = str(pdf_row['เลขบัญชี'])
+            
+            # Determine Business Partner
+            if business_partner:
+                bp = business_partner
+            else:
+                bp = xlookup(account_number, master_df.iloc[:, 4], master_df.iloc[:, 6])
+            
+            # A: Company Code
+            company_code = xlookup(account_number, master_df.iloc[:, 4], master_df.iloc[:, 0])
+            if company_code:
+                cash_sheet.cell(cash_row, 1).value = str(company_code)
+            
+            # B: Business Place
+            business_place = xlookup(account_number, master_df.iloc[:, 4], master_df.iloc[:, 1])
+            if business_place:
+                cash_sheet.cell(cash_row, 2).value = str(business_place).zfill(4)
+            
+            # E: Start Date
+            cash_sheet.cell(cash_row, 5).value = "23.12.2025"
+            
+            # F: Payment Amount
+            cash_sheet.cell(cash_row, 6).value = amount
+            
+            # G: Bank Account Number
+            cash_sheet.cell(cash_row, 7).value = str(account_number)
+            
+            # C: Company Name from FCHN column H
+            company_name = xlookup(str(account_number), fchn_df.iloc[:, 8], fchn_df.iloc[:, 7])
+            if company_name and str(company_name).lower() not in ['none', 'nan', '']:
+                cash_sheet.cell(cash_row, 3).value = str(company_name)
+            
+            # D: House Bank from FCHN column C
+            house_bank = xlookup(str(account_number), fchn_df.iloc[:, 8], fchn_df.iloc[:, 2])
+            if house_bank and str(house_bank).lower() not in ['none', 'nan', '']:
+                bank_name_only = re.sub(r'\d+', '', str(house_bank)).strip()
+                cash_sheet.cell(cash_row, 4).value = bank_name_only
+            
+            # H: Assignment
+            cash_sheet.cell(cash_row, 8).value = f"CHQ{cheque_number}"
+            
+            # I: Business Partner
+            if bp:
+                cash_sheet.cell(cash_row, 9).value = str(bp)
+        
+        # Save to BytesIO
         output = BytesIO()
-        with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
-            df_tr.to_excel(writer, sheet_name='TR', index=False)
-            df_cash.to_excel(writer, sheet_name='Cash', index=False)
+        template_wb.save(output)
+        template_wb.close()
         output.seek(0)
         
-        return output, len(df_tr) + len(df_cash)
+        return output, len(pdf_df)
         
     except Exception as e:
         st.error(f"❌ เกิดข้อผิดพลาด: {str(e)}")
         st.code(traceback.format_exc())
         return None, 0
 
-# ========== Streamlit UI ==========
+# ========== Main UI ==========
 def main():
-    st.set_page_config(page_title="Thai Cheque OCR", page_icon="🏦", layout="wide")
-    
     st.title("🏦 ระบบดึงข้อความจากเช็คไทย")
     st.caption("📌 ใช้ EasyOCR (ไทย + อังกฤษ) + Tesseract MICR (e13b)")
     
@@ -454,14 +562,14 @@ def main():
         uploaded_file = st.file_uploader(
             "เลือกไฟล์ PDF หรือ รูปภาพ",
             type=['pdf', 'jpg', 'jpeg', 'png'],
-            help="รองรับไฟล์ PDF และรูปภาพ (JPG, PNG)"
+            help="รองรับไฟล์ PDF และรูปภาพ (JPG, PNG)",
+            key="ocr_upload"
         )
         
         if uploaded_file:
             col1, col2 = st.columns([1, 1])
             
             with col1:
-                # แสดงตัวอย่างไฟล์
                 try:
                     uploaded_file.seek(0)
                     if uploaded_file.name.lower().endswith('.pdf'):
@@ -474,26 +582,16 @@ def main():
             
             with col2:
                 if st.button("🚀 เริ่มประมวลผล", type="primary", use_container_width=True):
-                    with st.spinner("⏳ กำลังประมวลผล... (EasyOCR ครั้งแรกใช้เวลา 2-3 นาที)"):
+                    with st.spinner("⏳ กำลังประมวลผล..."):
                         all_results, all_cropped = process_cheque(uploaded_file)
                         
                         if all_results:
                             st.success(f"✅ ประมวลผลสำเร็จ! พบ {len(all_results)} หน้า")
                             
-                            # แสดงผลเป็นตาราง
                             df_result = pd.DataFrame(all_results)
                             st.dataframe(df_result, use_container_width=True)
                             
-                            # Download CSV
-                            csv = df_result.to_csv(index=False, encoding='utf-8-sig')
-                            st.download_button(
-                                label="📥 ดาวน์โหลด CSV",
-                                data=csv,
-                                file_name="cheque_data.csv",
-                                mime="text/csv"
-                            )
-                            
-                            # Download Excel (with text format)
+                            # Download Excel
                             output = BytesIO()
                             with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
                                 df_result.to_excel(writer, sheet_name='Cheques', index=False)
@@ -502,7 +600,6 @@ def main():
                                 worksheet = writer.sheets['Cheques']
                                 text_format = workbook.add_format({'num_format': '@'})
                                 
-                                # ตั้งค่าคอลัมน์ที่เป็นตัวเลขให้เป็น text
                                 for col_name in ["หมายเลขเช็ค", "เลขบัญชี", "Cheque digit", "รหัสธนาคาร", "รหัสสาขา"]:
                                     if col_name in df_result.columns:
                                         col_idx = df_result.columns.get_loc(col_name)
@@ -516,8 +613,7 @@ def main():
                                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
                             )
                             
-                            # แสดงภาพที่ crop แล้ว (ทุกหน้า)
-                            with st.expander("🖼️ ดูภาพที่ Crop แล้ว (ทุกหน้า)"):
+                            with st.expander("🖼️ ดูภาพที่ Crop แล้ว"):
                                 for idx, cropped in enumerate(all_cropped, start=1):
                                     st.image(
                                         cv2.cvtColor(cropped, cv2.COLOR_BGR2RGB), 
@@ -527,37 +623,102 @@ def main():
     
     # ===== TAB 2: Template Filling =====
     with tab2:
-        st.markdown("### 📤 อัปโหลดไฟล์")
+        st.markdown("### 📤 อัปโหลดไฟล์ที่จำเป็น")
+        
         col1, col2 = st.columns(2)
         
         with col1:
-            data_file = st.file_uploader(
-                "📊 ไฟล์ข้อมูล (Data)",
+            st.markdown("**📂 ไฟล์หลัก**")
+            
+            template_file = st.file_uploader(
+                "1️⃣ Template File",
                 type=['xlsx'],
-                help="ไฟล์ Excel ที่มีคอลัมน์: รหัสบุคคล, ชื่อ, จำนวนเงิน, หมายเหตุ"
+                help="Template TR & Cash.xlsx",
+                key="template_uploader"
+            )
+            
+            pdf_file = st.file_uploader(
+                "2️⃣ Extracted Data (จาก Tab 1)",
+                type=['xlsx'],
+                help="ไฟล์ Excel ที่ดึงข้อมูลจากเช็คแล้ว",
+                key="pdf_uploader"
             )
         
         with col2:
-            template_file = st.file_uploader(
-                "📋 ไฟล์ Template",
+            st.markdown("**📊 ไฟล์ Lookup**")
+            
+            fchn_file = st.file_uploader(
+                "3️⃣ FCHN File",
                 type=['xlsx'],
-                help="ไฟล์ Excel Template ที่มี 2 sheets: TR และ Cash"
+                help="FCHN.xlsx สำหรับ Lookup",
+                key="fchn_uploader"
+            )
+            
+            master_file = st.file_uploader(
+                "4️⃣ Master File",
+                type=['xlsx'],
+                help="Copy of Master File*.xlsx",
+                key="master_uploader"
             )
         
-        if data_file and template_file:
-            if st.button("🚀 เริ่มเติมข้อมูล", type="primary", use_container_width=True):
-                with st.spinner("⏳ กำลังประมวลผล..."):
-                    output, count = process_template_filling(data_file, template_file)
-                    
-                    if output:
-                        st.success(f"✅ เติมข้อมูลสำเร็จ! จำนวน {count} แถว")
-                        
-                        st.download_button(
-                            label="📥 ดาวน์โหลดไฟล์ที่เติมข้อมูลแล้ว",
-                            data=output,
-                            file_name="template_filled.xlsx",
-                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        st.markdown("---")
+        st.markdown("### ⚙️ การตั้งค่า")
+        business_partner = st.text_input(
+            "Business Partner (ถ้าไม่ระบุจะใช้ Auto-lookup)",
+            placeholder="เช่น UOB0052, CIM0199, TNB0497",
+            help="ปล่อยว่างไว้เพื่อให้ระบบค้นหาจาก Master file อัตโนมัติ"
+        )
+        
+        st.markdown("---")
+        
+        if st.button(
+            "🚀 ประมวลผล Template", 
+            type="primary", 
+            use_container_width=True,
+            disabled=not all([template_file, pdf_file, fchn_file, master_file])
+        ):
+            if all([template_file, pdf_file, fchn_file, master_file]):
+                try:
+                    with st.spinner("⏳ กำลังประมวลผล Template..."):
+                        output, total_rows = process_template_filling(
+                            pdf_file,
+                            fchn_file,
+                            master_file,
+                            template_file,
+                            business_partner.strip()
                         )
+                        
+                        if output:
+                            st.success(f"✅ ประมวลผลสำเร็จ! จำนวน {total_rows} แถว")
+                            
+                            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                            st.download_button(
+                                label="📥 ดาวน์โหลด Template ที่เติมข้อมูลแล้ว",
+                                data=output,
+                                file_name=f"Template_PDF_Filled_{timestamp}.xlsx",
+                                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                            )
+                
+                except Exception as e:
+                    st.error(f"❌ เกิดข้อผิดพลาด: {str(e)}")
+                    st.code(traceback.format_exc())
+            else:
+                st.warning("⚠️ กรุณาอัปโหลดไฟล์ให้ครบทั้ง 4 ไฟล์!")
+        
+        st.markdown("---")
+        st.markdown("""
+        ### 📝 วิธีใช้งาน
+        1. อัปโหลด **Template TR & Cash.xlsx**
+        2. อัปโหลด **Extracted Data** จาก Tab 1
+        3. อัปโหลด **FCHN.xlsx** และ **Master File**
+        4. กดปุ่ม **ประมวลผล Template**
+        5. ดาวน์โหลดไฟล์ที่เติมข้อมูลแล้ว
+        
+        ### ℹ️ ระบบจะทำอะไรบ้าง
+        - เติมข้อมูลลง TR Teams & Cash Teams sheets
+        - ทำ XLOOKUP จาก FCHN & Master อัตโนมัติ
+        - พร้อม Import เข้า SAP ได้เลย
+        """)
 
 if __name__ == "__main__":
     main()
