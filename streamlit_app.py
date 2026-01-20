@@ -423,67 +423,67 @@ def process_template_filling(pdf_file, fchn_file, master_file, template_file, bu
                 account_number = str(pdf_row['เลขบัญชี'])
                 
                 st.info(f"⚙️ กำลังประมวลผลแถว {idx+1}/{total_rows} - เช็ค: {cheque_number}, บัญชี: {account_number}")
-            
-            # Determine Business Partner
-            if business_partner:
-                bp = business_partner
-            else:
-                bp = xlookup(account_number, master_df.iloc[:, 4], master_df.iloc[:, 6])
-            
-            # Fill Business Partner to Template
-            if bp:
-                template_sheet.cell(row_num, 2).value = str(bp)
-            
-            template_sheet.cell(row_num, 6).value = "23.12.2025"
-            template_sheet.cell(row_num, 10).value = "23.12.2025"
-            template_sheet.cell(row_num, 8).value = amount
-            template_sheet.cell(row_num, 15).value = f"CHQ{cheque_number}"
-            template_sheet.cell(row_num, 31).value = str(account_number)
-            
-            # Lookups from FCHN
-            cheque_str = str(cheque_number)
-            cheque_last8 = int(cheque_str[-8:]) if len(cheque_str) >= 8 else int(cheque_str)
-            
-            p_result = xlookup(cheque_last8, fchn_df.iloc[:, 0], fchn_df.iloc[:, 5])
-            if p_result is not None:
-                template_sheet.cell(row_num, 16).value = str(p_result)
-            
-            # Lookups from Master
-            if bp:
-                lookup_key = str(bp) + str(account_number)
                 
-                i_result = xlookup(lookup_key, master_df.iloc[:, 12], master_df.iloc[:, 11])
-                if i_result is not None:
-                    template_sheet.cell(row_num, 9).value = str(i_result)
+                # Determine Business Partner
+                if business_partner:
+                    bp = business_partner
+                else:
+                    bp = xlookup(account_number, master_df.iloc[:, 4], master_df.iloc[:, 6])
                 
-                k_result = xlookup(lookup_key, master_df.iloc[:, 12], master_df.iloc[:, 7])
-                if k_result is not None:
-                    template_sheet.cell(row_num, 11).value = str(k_result)
-                    template_sheet.cell(row_num, 17).value = str(k_result)
+                # Fill Business Partner to Template
+                if bp:
+                    template_sheet.cell(row_num, 2).value = str(bp)
                 
-                y_result = xlookup(lookup_key, master_df.iloc[:, 12], master_df.iloc[:, 8])
-                if y_result is not None:
-                    template_sheet.cell(row_num, 25).value = str(y_result)
-                    template_sheet.cell(row_num, 37).value = str(y_result)
+                template_sheet.cell(row_num, 6).value = "23.12.2025"
+                template_sheet.cell(row_num, 10).value = "23.12.2025"
+                template_sheet.cell(row_num, 8).value = amount
+                template_sheet.cell(row_num, 15).value = f"CHQ{cheque_number}"
+                template_sheet.cell(row_num, 31).value = str(account_number)
                 
-                ac_result = xlookup(lookup_key, master_df.iloc[:, 12], master_df.iloc[:, 10])
-                if ac_result is not None:
-                    template_sheet.cell(row_num, 29).value = str(ac_result)
-            
-            # Company Code to Column A
-            a_result = xlookup(account_number, master_df.iloc[:, 4], master_df.iloc[:, 0])
-            if a_result is not None:
-                template_sheet.cell(row_num, 1).value = str(a_result)
-            
-            # Cost Center to Column R
-            r_result = xlookup(account_number, master_df.iloc[:, 4], master_df.iloc[:, 9])
-            if r_result is not None:
-                template_sheet.cell(row_num, 18).value = str(r_result)
-            
-            s_result = xlookup(account_number, master_df.iloc[:, 4], master_df.iloc[:, 1])
-            if s_result is not None:
-                template_sheet.cell(row_num, 19).value = str(s_result).zfill(4)
+                # Lookups from FCHN
+                cheque_str = str(cheque_number)
+                cheque_last8 = int(cheque_str[-8:]) if len(cheque_str) >= 8 else int(cheque_str)
                 
+                p_result = xlookup(cheque_last8, fchn_df.iloc[:, 0], fchn_df.iloc[:, 5])
+                if p_result is not None:
+                    template_sheet.cell(row_num, 16).value = str(p_result)
+                
+                # Lookups from Master
+                if bp:
+                    lookup_key = str(bp) + str(account_number)
+                    
+                    i_result = xlookup(lookup_key, master_df.iloc[:, 12], master_df.iloc[:, 11])
+                    if i_result is not None:
+                        template_sheet.cell(row_num, 9).value = str(i_result)
+                    
+                    k_result = xlookup(lookup_key, master_df.iloc[:, 12], master_df.iloc[:, 7])
+                    if k_result is not None:
+                        template_sheet.cell(row_num, 11).value = str(k_result)
+                        template_sheet.cell(row_num, 17).value = str(k_result)
+                    
+                    y_result = xlookup(lookup_key, master_df.iloc[:, 12], master_df.iloc[:, 8])
+                    if y_result is not None:
+                        template_sheet.cell(row_num, 25).value = str(y_result)
+                        template_sheet.cell(row_num, 37).value = str(y_result)
+                    
+                    ac_result = xlookup(lookup_key, master_df.iloc[:, 12], master_df.iloc[:, 10])
+                    if ac_result is not None:
+                        template_sheet.cell(row_num, 29).value = str(ac_result)
+                
+                # Company Code to Column A
+                a_result = xlookup(account_number, master_df.iloc[:, 4], master_df.iloc[:, 0])
+                if a_result is not None:
+                    template_sheet.cell(row_num, 1).value = str(a_result)
+                
+                # Cost Center to Column R
+                r_result = xlookup(account_number, master_df.iloc[:, 4], master_df.iloc[:, 9])
+                if r_result is not None:
+                    template_sheet.cell(row_num, 18).value = str(r_result)
+                
+                s_result = xlookup(account_number, master_df.iloc[:, 4], master_df.iloc[:, 1])
+                if s_result is not None:
+                    template_sheet.cell(row_num, 19).value = str(s_result).zfill(4)
+                    
             except Exception as e:
                 st.error(f"❌ ข้อผิดพลาดที่แถว {idx+1} (TR): {str(e)}")
                 st.code(traceback.format_exc())
