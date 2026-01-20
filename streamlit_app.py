@@ -485,6 +485,13 @@ def process_template_filling(pdf_file, fchn_file, master_file, template_file, bu
                 template_sheet.cell(row_num, 19).value = str(s_result).zfill(4)
                 
             except Exception as e:
+                st.error(f"❌ ข้อผิดพลาดที่แถว {idx+1} (TR): {str(e)}")
+                st.code(traceback.format_exc())
+                continue
+        
+        st.success(f"✅ TR Teams: เติมข้อมูลเสร็จสิ้น {total_rows} แถว")
+        
+        # Process Cash Teams
         st.info(f"📊 เริ่มประมวลผล Cash Teams: พบ {total_rows} แถว")
         
         max_row = cash_sheet.max_row
@@ -501,53 +508,50 @@ def process_template_filling(pdf_file, fchn_file, master_file, template_file, bu
                 amount = pdf_row['จำนวนเงิน']
                 account_number = str(pdf_row['เลขบัญชี'])
                 
-                st.info(f"⚙️ กำลังประมวลผลแถว {idx+1}/{total_rows} - เช็ค: {cheque_number}"ne
-        
-        cash_start_row = 6
-        for idx, pdf_row in pdf_df.iterrows():
-            cash_row = cash_start_row + idx
-            
-            cheque_number = str(pdf_row['หมายเลขเช็ค'])
-            amount = pdf_row['จำนวนเงิน']
-            account_number = str(pdf_row['เลขบัญชี'])
-            
-            # Determine Business Partner
-            if business_partner:
-                bp = business_partner
-            else:
-                bp = xlookup(account_number, master_df.iloc[:, 4], master_df.iloc[:, 6])
-            
-            # A: Company Code
-            company_code = xlookup(account_number, master_df.iloc[:, 4], master_df.iloc[:, 0])
-            if company_code:
-                cash_sheet.cell(cash_row, 1).value = str(company_code)
-            
-            # B: Business Place
-            business_place = xlookup(account_number, master_df.iloc[:, 4], master_df.iloc[:, 1])
-            if business_place:
-                cash_sheet.cell(cash_row, 2).value = str(business_place).zfill(4)
-            
-            # E: Start Date
-            cash_sheet.cell(cash_row, 5).value = "23.12.2025"
-            
-            # F: Payment Amount
-            cash_sheet.cell(cash_row, 6).value = amount
-            
-            # G: Bank Account Number
-            cash_sheet.cell(cash_row, 7).value = str(account_number)
-            
-            # C: Company Name from FCHN column H
-            company_name = xlookup(str(account_number), fchn_df.iloc[:, 8], fchn_df.iloc[:, 7])
-            if company_name and str(company_name).lower() not in ['none', 'nan', '']:
-                cash_sheet.cell(cash_row, 3).value = str(company_name)
-            
-            # D: House Bank from FCHN column C
-            house_bank = xlookup(str(account_number), fchn_df.iloc[:, 8], fchn_df.iloc[:, 2])
-            if house_bank and str(house_bank).lower() not in ['none', 'nan', '']:
-                bank_name_only = re.sub(r'\d+', '', str(house_bank)).strip()
-                cash_sheet.cell(cash_row, 4).value = bank_name_only
-            
-            # H: Assignment
+                st.info(f"⚙️ กำลังประมวลผลแถว {idx+1}/{total_rows} - เช็ค: {cheque_number}")
+                
+                # Determine Business Partner
+                if business_partner:
+                    bp = business_partner
+                else:
+                    bp = xlookup(account_number, master_df.iloc[:, 4], master_df.iloc[:, 6])
+                
+                # A: Company Code
+                company_code = xlookup(account_number, master_df.iloc[:, 4], master_df.iloc[:, 0])
+                if company_code:
+                    cash_sheet.cell(cash_row, 1).value = str(company_code)
+                
+                # B: Business Place
+                business_place = xlookup(account_number, master_df.iloc[:, 4], master_df.iloc[:, 1])
+                if business_place:
+                    cash_sheet.cell(cash_row, 2).value = str(business_place).zfill(4)
+                
+                # E: Start Date
+                cash_sheet.cell(cash_row, 5).value = "23.12.2025"
+                
+                # F: Payment Amount
+                cash_sheet.cell(cash_row, 6).value = amount
+                
+                # G: Bank Account Number
+                cash_sheet.cell(cash_row, 7).value = str(account_number)
+                
+                # C: Company Name from FCHN column H
+                company_name = xlookup(str(account_number), fchn_df.iloc[:, 8], fchn_df.iloc[:, 7])
+                if company_name and str(company_name).lower() not in ['none', 'nan', '']:
+                    cash_sheet.cell(cash_row, 3).value = str(company_name)
+                
+                # D: House Bank from FCHN column C
+                house_bank = xlookup(str(account_number), fchn_df.iloc[:, 8], fchn_df.iloc[:, 2])
+                if house_bank and str(house_bank).lower() not in ['none', 'nan', '']:
+                    bank_name_only = re.sub(r'\d+', '', str(house_bank)).strip()
+                    cash_sheet.cell(cash_row, 4).value = bank_name_only
+                
+                # H: Assignment
+                cash_sheet.cell(cash_row, 8).value = f"CHQ{cheque_number}"
+                
+                # I: Business Partner
+                if bp:
+                    cash_sheet.cell(cash_row, 9).value = str(bp)
                 
             except Exception as e:
                 st.error(f"❌ ข้อผิดพลาดที่แถว {idx+1} (Cash): {str(e)}")
@@ -555,11 +559,6 @@ def process_template_filling(pdf_file, fchn_file, master_file, template_file, bu
                 continue
         
         st.success(f"✅ Cash Teams: เติมข้อมูลเสร็จสิ้น {total_rows} แถว")
-            cash_sheet.cell(cash_row, 8).value = f"CHQ{cheque_number}"
-            
-            # I: Business Partner
-            if bp:
-                cash_sheet.cell(cash_row, 9).value = str(bp)
         
         # Save to BytesIO
         output = BytesIO()
@@ -707,13 +706,7 @@ def main():
                     with st.spinner("⏳ กำลังประมวลผล Template..."):
                         output, total_rows = process_template_filling(
                             pdf_file,
-                            fchn_file,")
-                            st.info(f"""
-                            📋 สรุปผลการประมวลผล:
-                            - จำนวนแถวที่ประมวลผล: {total_rows} แถว
-                            - TR Teams: แถว {11} ถึง {11 + total_rows - 1}
-                            - Cash Teams: แถว {6} ถึง {6 + total_rows - 1}
-                            ""
+                            fchn_file,
                             master_file,
                             template_file,
                             business_partner.strip()
@@ -721,6 +714,12 @@ def main():
                         
                         if output:
                             st.success(f"✅ ประมวลผลสำเร็จ! จำนวน {total_rows} แถว")
+                            st.info(f"""
+                            📋 สรุปผลการประมวลผล:
+                            - จำนวนแถวที่ประมวลผล: {total_rows} แถว
+                            - TR Teams: แถว 11 ถึง {11 + total_rows - 1}
+                            - Cash Teams: แถว 6 ถึง {6 + total_rows - 1}
+                            """)
                             
                             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
                             st.download_button(
