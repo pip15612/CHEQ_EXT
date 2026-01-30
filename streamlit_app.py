@@ -276,70 +276,183 @@ def extract_thai_data(image, reader):
     
     return data
 
-# ========== Process Cheque (OCR) ==========
-def process_cheque(uploaded_file):
-    """ประมวลผลไฟล์เช็ค - รองรับหลายหน้า"""
+def process_template_filling(pdf_file, fchn_file, master_file, template_file, business_partner=""):
+    """ประมวลผล Template Filling - เขียนทับแถวใหม่ และลบแถวส่วนเกินทิ้ง"""
     try:
-        reader = initialize_easyocr()
+        # Load Template
+        template_wb = openpyxl.load_workbook(template_file)
+        template_sheet = template_wb['TEMPLATE (TR Teams) ']
+        cash_sheet = template_wb['TEMPLATE (Cash Teams)']
         
-        uploaded_file.seek(0)
-        file_bytes = uploaded_file.read()
+        # Load data files
+        pdf_df = pd.read_excel(pdf_file, sheet_name=0, dtype=str)
         
-        st.info("📄 กำลังแปลงไฟล์...")
-        images = []
-        if uploaded_file.name.lower().endswith('.pdf'):
-            pdf_images = convert_from_bytes(file_bytes, dpi=250)
-            images = pdf_images
-        else:
-            images = [Image.open(BytesIO(file_bytes))]
+        # Map column names
+        column_mapping = {
+            'เลขบัญชี': 'เลขบัญชี', 'Account number': 'เลขบัญชี',
+            'หมายเลขเช็ค': 'หมายเลขเช็ค', 'Cheque Number': 'หมายเลขเช็ค',
+            'จำนวนเงิน': 'จำนวนเงิน', 'Amount': 'จำนวนเงิน'
+        }
+        for old_name, new_name in column_mapping.items():
+            if old_name in pdf_df.columns:
+                pdf_df = pdf_df.rename(columns={old_name: new_name})
         
-        total_pages = len(images)
-        st.info(f"📄 พบ {total_pages} หน้า กำลังประมวลผล...")
+        fchn_df = pd.read_excel(fchn_file, sheet_name=0, dtype=str)
+        master_df = pd.read_excel(master_file, sheet_name=0, dtype=str)
+
+        total_rows = len(pdf_df)
         
-        all_results = []
-        all_cropped = []
-        
-        for page_num, image in enumerate(images, start=1):
-            st.info(f"📄 กำลังประมวลผลหน้า {page_num}/{total_pages}...")
+        # ==========================================
+        # 1. จัดการ SHEET: TR Teams
+        # ==========================================
+        start_row_tr = 11
+        st.info(f"📊 เริ่มประมวลผล TR Teams (เขียนทับ {total_rows} แถว และลบส่วนเกิน)")
+
+        # --- Phase 1: เขียนข้อมูลลงแถวใหม่ (Overwrite) ---
+        for idx, pdf_row in pdf_df.iterrows():
+            row_num = start_row_tr + idx
             
-            max_dim = 3000
-            if max(image.size) > max_dim:
-                ratio = max_dim / max(image.size)
-                new_size = (int(image.size[0] * ratio), int(image.size[1] * ratio))
-                image = image.resize(new_size, Image.Resampling.LANCZOS)
-            
-            cv_image = cv2.cvtColor(np.array(image), cv2.COLOR_RGB2BGR)
-            cropped = robust_auto_crop(cv_image)
-            all_cropped.append(cropped)
-            
-            data = extract_thai_data(cropped, reader)
-            micr_raw = extract_micr(cropped)
-            cheque_digit = extract_cheque_digit(micr_raw)
-            chq_no, bank_cd, br_cd, acc_no = parse_micr_thai(micr_raw)
-            
-            result = {
-                "หน้า": page_num,
-                "วันที่": data["Date"],
-                "ผู้รับเงิน": data["Payee"],
-                "จำนวนเงิน": data["Amount_Num"],
-                "จำนวนเงิน (คำอ่าน)": data["Amount_Text"],
-                "Cheque digit": cheque_digit,
-                "หมายเลขเช็ค": chq_no,
-                "รหัสธนาคาร": bank_cd,
-                "รหัสสาขา": br_cd,
-                "เลขบัญชี": acc_no,
-                "MICR (ดิบ)": micr_raw[:100]
-            }
-            
-            all_results.append(result)
+            try:
+                cheque_number = str(pdf_row['หมายเลขเช็ค'])
+                amount = pdf_row['จำนวนเงิน']
+                account_number = str(pdf_row['เลขบัญชี'])
+                
+                # Logic เดิมในการหา Business Partner และ Lookup ค่าต่างๆ
+                if business_partner:
+                    bp = business_partner
+                else:
+                    bp = xlookup(account_number, master_df.iloc[:, 4], master_df.iloc[:, 6])
+                
+                if bp: template_sheet.cell(row_num, 2).value = str(bp)
+                
+                # เขียนค่าลง Cell (จะไม่กระทบคอลัมน์อื่นที่เราไม่ได้สั่งแก้)
+                template_sheet.cell(row_num, 6).value = "23.12.2025"
+                template_sheet.cell(row_num, 10).value = "23.12.2025"
+                template_sheet.cell(row_num, 8).value = amount
+                template_sheet.cell(row_num, 15).value = f"CHQ{cheque_number}"
+                template_sheet.cell(row_num, 31).value = str(account_number)
+                
+                # Lookup Logic (FCHN & Master) ...
+                cheque_str = str(cheque_number)
+                cheque_last8 = int(cheque_str[-8:]) if len(cheque_str) >= 8 else int(cheque_str)
+                p_result = xlookup(cheque_last8, fchn_df.iloc[:, 0], fchn_df.iloc[:, 5])
+                if p_result: template_sheet.cell(row_num, 16).value = str(p_result)
+                
+                if bp:
+                    lookup_key = str(bp) + str(account_number)
+                    i_result = xlookup(lookup_key, master_df.iloc[:, 12], master_df.iloc[:, 11])
+                    if i_result: template_sheet.cell(row_num, 9).value = str(i_result)
+                    
+                    k_result = xlookup(lookup_key, master_df.iloc[:, 12], master_df.iloc[:, 7])
+                    if k_result: 
+                        template_sheet.cell(row_num, 11).value = str(k_result)
+                        template_sheet.cell(row_num, 17).value = str(k_result)
+                    
+                    y_result = xlookup(lookup_key, master_df.iloc[:, 12], master_df.iloc[:, 8])
+                    if y_result: 
+                        template_sheet.cell(row_num, 25).value = str(y_result)
+                        template_sheet.cell(row_num, 37).value = str(y_result)
+                    
+                    ac_result = xlookup(lookup_key, master_df.iloc[:, 12], master_df.iloc[:, 10])
+                    if ac_result: template_sheet.cell(row_num, 29).value = str(ac_result)
+                
+                a_result = xlookup(account_number, master_df.iloc[:, 4], master_df.iloc[:, 0])
+                if a_result: template_sheet.cell(row_num, 1).value = str(a_result)
+                
+                r_result = xlookup(account_number, master_df.iloc[:, 4], master_df.iloc[:, 9])
+                if r_result: template_sheet.cell(row_num, 18).value = str(r_result)
+                
+                s_result = xlookup(account_number, master_df.iloc[:, 4], master_df.iloc[:, 1])
+                if s_result: template_sheet.cell(row_num, 19).value = str(s_result).zfill(4)
+
+            except Exception as e:
+                st.error(f"❌ Error TR Row {idx+1}: {e}")
+                continue
+
+        # --- Phase 2: ลบแถวส่วนเกิน (Trimming Ghost Rows) ---
+        last_data_row_tr = start_row_tr + total_rows
+        max_row_tr = template_sheet.max_row
         
-        return all_results, all_cropped
+        # ถ้าไฟล์เดิมมีข้อมูลยาวกว่าข้อมูลใหม่ ให้ลบส่วนเกินทิ้ง
+        if max_row_tr >= last_data_row_tr:
+            st.info(f"🧹 กำลังล้างข้อมูลเก่าส่วนเกิน ตั้งแต่แถว {last_data_row_tr} ถึง {max_row_tr}")
+            for r in range(last_data_row_tr, max_row_tr + 1):
+                # ลบเฉพาะช่วงคอลัมน์ A ถึง AI (1-35) เพื่อไม่ให้ขยะเหลือ
+                for c in range(1, 36): 
+                    template_sheet.cell(r, c).value = None
+
+        st.success("✅ TR Teams: เสร็จสมบูรณ์")
+
+        # ==========================================
+        # 2. จัดการ SHEET: Cash Teams
+        # ==========================================
+        start_row_cash = 6
+        st.info(f"📊 เริ่มประมวลผล Cash Teams")
+
+        # --- Phase 1: เขียนข้อมูลลงแถวใหม่ ---
+        for idx, pdf_row in pdf_df.iterrows():
+            cash_row = start_row_cash + idx
+            try:
+                cheque_number = str(pdf_row['หมายเลขเช็ค'])
+                amount = pdf_row['จำนวนเงิน']
+                account_number = str(pdf_row['เลขบัญชี'])
+                
+                if business_partner:
+                    bp = business_partner
+                else:
+                    bp = xlookup(account_number, master_df.iloc[:, 4], master_df.iloc[:, 6])
+                
+                company_code = xlookup(account_number, master_df.iloc[:, 4], master_df.iloc[:, 0])
+                if company_code: cash_sheet.cell(cash_row, 1).value = str(company_code)
+                
+                business_place = xlookup(account_number, master_df.iloc[:, 4], master_df.iloc[:, 1])
+                if business_place: cash_sheet.cell(cash_row, 2).value = str(business_place).zfill(4)
+                
+                cash_sheet.cell(cash_row, 5).value = "23.12.2025"
+                cash_sheet.cell(cash_row, 6).value = amount
+                cash_sheet.cell(cash_row, 7).value = str(account_number)
+                
+                company_name = xlookup(str(account_number), fchn_df.iloc[:, 8], fchn_df.iloc[:, 7])
+                if company_name and str(company_name).lower() not in ['none', 'nan', '']:
+                    cash_sheet.cell(cash_row, 3).value = str(company_name)
+                
+                house_bank = xlookup(str(account_number), fchn_df.iloc[:, 8], fchn_df.iloc[:, 2])
+                if house_bank and str(house_bank).lower() not in ['none', 'nan', '']:
+                    bank_name_only = re.sub(r'\d+', '', str(house_bank)).strip()
+                    cash_sheet.cell(cash_row, 4).value = bank_name_only
+                
+                cash_sheet.cell(cash_row, 8).value = f"CHQ{cheque_number}"
+                if bp: cash_sheet.cell(cash_row, 9).value = str(bp)
+
+            except Exception as e:
+                st.error(f"❌ Error Cash Row {idx+1}: {e}")
+                continue
+
+        # --- Phase 2: ลบแถวส่วนเกิน ---
+        last_data_row_cash = start_row_cash + total_rows
+        max_row_cash = cash_sheet.max_row
+        
+        if max_row_cash >= last_data_row_cash:
+            for r in range(last_data_row_cash, max_row_cash + 1):
+                # ลบเฉพาะช่วงคอลัมน์ A ถึง AN (1-40)
+                for c in range(1, 41):
+                    cash_sheet.cell(r, c).value = None
+        
+        st.success("✅ Cash Teams: เสร็จสมบูรณ์")
+
+        # Save
+        output = BytesIO()
+        template_wb.save(output)
+        template_wb.close()
+        output.seek(0)
+        
+        return output, len(pdf_df)
         
     except Exception as e:
         st.error(f"❌ เกิดข้อผิดพลาด: {str(e)}")
         st.code(traceback.format_exc())
-        return None, None
-
+        return None, 0
+        
 # ========== XLOOKUP Function ==========
 def xlookup(lookup_value, lookup_array, return_array, if_not_found=None):
     """Mimics Excel's XLOOKUP function with automatic type conversion"""
@@ -752,3 +865,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
