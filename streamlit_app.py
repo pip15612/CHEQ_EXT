@@ -377,9 +377,14 @@ def xlookup(lookup_value, lookup_array, return_array, if_not_found=None):
         return if_not_found
 
 # ========== Process Template Filling ==========
-def process_template_filling(pdf_file, fchn_file, master_file, template_file, business_partner=""):
+def process_template_filling(pdf_file, fchn_file, master_file, template_file, business_partner="", payment_date=None):
     """ประมวลผล Template Filling - เขียนทับแถวใหม่ และลบแถวส่วนเกินทิ้ง"""
     try:
+        # Format date to dd.mm.yyyy
+        if payment_date:
+            formatted_date = payment_date.strftime("%d.%m.%Y")
+        else:
+            formatted_date = "23.12.2025"  # Default fallback
         # Load Template
         template_wb = openpyxl.load_workbook(template_file)
         template_sheet = template_wb['TEMPLATE (TR Teams) ']
@@ -427,8 +432,8 @@ def process_template_filling(pdf_file, fchn_file, master_file, template_file, bu
                 if bp: template_sheet.cell(row_num, 2).value = str(bp)
                 
                 # เขียนค่าลง Cell (จะไม่กระทบคอลัมน์อื่นที่เราไม่ได้สั่งแก้)
-                template_sheet.cell(row_num, 6).value = "23.12.2025"
-                template_sheet.cell(row_num, 10).value = "23.12.2025"
+                template_sheet.cell(row_num, 6).value = formatted_date  # Column F: Document Date
+                template_sheet.cell(row_num, 10).value = formatted_date  # Column J: Posting Date (ใช้ค่าเดียวกับ Column F)
                 template_sheet.cell(row_num, 8).value = amount
                 template_sheet.cell(row_num, 15).value = f"CHQ{cheque_number}"
                 template_sheet.cell(row_num, 31).value = str(account_number)
@@ -497,7 +502,7 @@ def process_template_filling(pdf_file, fchn_file, master_file, template_file, bu
                 business_place = xlookup(account_number, master_df.iloc[:, 4], master_df.iloc[:, 1])
                 if business_place: cash_sheet.cell(cash_row, 2).value = str(business_place).zfill(4)
                 
-                cash_sheet.cell(cash_row, 5).value = "23.12.2025"
+                cash_sheet.cell(cash_row, 5).value = formatted_date  # Column E: Start Date (ใช้ค่าเดียวกับ TR Column F)
                 cash_sheet.cell(cash_row, 6).value = amount
                 cash_sheet.cell(cash_row, 7).value = str(account_number)
                 
@@ -646,11 +651,23 @@ def main():
         
         st.markdown("---")
         st.markdown("### ⚙️ การตั้งค่า")
-        business_partner = st.text_input(
-            "Business Partner (ถ้าไม่ระบุจะใช้ Auto-lookup)",
-            placeholder="เช่น UOB0052, CIM0199, TNB0497",
-            help="ปล่อยว่างไว้เพื่อให้ระบบค้นหาจาก Master file อัตโนมัติ"
-        )
+        
+        col_setting1, col_setting2 = st.columns(2)
+        
+        with col_setting1:
+            business_partner = st.text_input(
+                "Business Partner (ถ้าไม่ระบุจะใช้ Auto-lookup)",
+                placeholder="เช่น UOB0052, CIM0199, TNB0497",
+                help="ปล่อยว่างไว้เพื่อให้ระบบค้นหาจาก Master file อัตโนมัติ"
+            )
+        
+        with col_setting2:
+            payment_date = st.date_input(
+                "วันที่ชำระเงิน (Payment Date)",
+                value=datetime(2025, 12, 23),
+                help="วันที่จะใช้ในทั้ง 3 คอลัมน์: TR Column F & J (Document/Posting Date) และ Cash Column E (Start Date)",
+                format="DD/MM/YYYY"
+            )
         
         st.markdown("---")
         
@@ -668,7 +685,8 @@ def main():
                             fchn_file,
                             master_file,
                             template_file,
-                            business_partner.strip()
+                            business_partner.strip(),
+                            payment_date
                         )
                         
                         if output:
